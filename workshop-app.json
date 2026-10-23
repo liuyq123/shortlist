@@ -11,7 +11,7 @@
     "port": 8080,
     "healthPath": "/healthz"
   },
-  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. Screening today's papers takes about a minute. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and apply its tested proposal. Open the Agent log to watch each model request and tool call.",
+  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. The first papers appear in about 15 seconds; the rest fill in as they're scored. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and apply its tested proposal. Open the Agent log to watch each model request and tool call.",
   "inference": {
     "mode": "selectable",
     "models": [

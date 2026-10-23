@@ -8,9 +8,9 @@ Problems that don't stop a run, such as a failed batch, are recorded as issues.
 The last MAX_RUNS runs are kept in memory.
 
     with activity.run("screener", "Screen today's papers", emit):
-        with activity.span("group", "Pass 1: title screen") as group:
+        with activity.span("group", "Batch 1 of 3: 150 titles") as group:
             ...                      # model requests made here become its children
-            group.finish(summary="557 titles, 176 kept")
+            group.finish(summary="kept 48 of 150 titles; scored 48, 41 at 4+")
 """
 
 import contextvars

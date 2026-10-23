@@ -6,6 +6,11 @@ Two-pass LLM screening of recent arXiv papers.
 2. Abstract scoring: survivors in batches of 15 get a 0-10 score, the matching
    interest, and a one-sentence reason.
 
+Each title batch is followed by scoring its survivors, and the feed is sent
+after every scored batch, so papers appear while the rest are still screened.
+Batches run in parallel only as far as the allowance can hold their requests
+(each one holds its worst-case cost while it runs); otherwise one at a time, in order.
+
 Both passes use the model the visitor selected in the class app store, through
 the gateway. Replies are JSON checked by this app. Results are stored per
 (paper, profile version), so nothing is screened twice.
@@ -21,7 +26,7 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm import activity, arxiv, config, gateway, store
 from paperfind_llm.activity import section
 from paperfind_llm.gateway import ReplyError, call_json, describe_error
 from paperfind_llm.profile import profile_hash, render
@@ -30,7 +35,7 @@ TITLE_BATCH_SIZE = 150
 ABSTRACT_BATCH_SIZE = 15
 MAX_ABSTRACT_CHARS = 1500
 MAX_OUTPUT_TOKENS = 4096
-MAX_WORKERS = 3  # parallel requests; the gateway may refuse more
+MAX_WORKERS = 3  # parallel batches at most, when the allowance can hold that many requests
 MIN_SCORE = 4  # papers below this are hidden from the feed
 FETCH_MAX_AGE_SECONDS = 3600
 
@@ -199,15 +204,15 @@ class Screener:
             activity.issue("skipped", f"{task}: the model left out {_papers(self.skipped)} twice. {later}", count=self.skipped)
 
 
-def _run_batches(fn: Callable, items: list, batch_size: int, on_batch: Callable[[int, int], None]) -> tuple[list, list]:
-    """Run fn(batch, "batch i of n") over batches in parallel, reporting (done, total) after each batch.
+def _run_batches(fn: Callable, items: list, batch_size: int) -> tuple[list, list]:
+    """Run fn(batch, "batch i of n") over batches in parallel.
 
     Returns the combined results and the failed batches as (batch, exception) pairs.
     Raises only if every batch fails. Papers in a failed batch are retried on the next refresh.
     """
-    batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-    results, failures, done = [], [], 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    batches = _split(items, batch_size)
+    results, failures = [], []
+    with ThreadPoolExecutor(max_workers=gateway.allowance.parallel(MAX_OUTPUT_TOKENS, MAX_WORKERS)) as pool:
         # Each batch runs in a copy of this context, so its log entries land in the current run
         futures = {
             pool.submit(contextvars.copy_context().run, fn, batch, f"batch {i} of {len(batches)}"): batch
@@ -218,11 +223,23 @@ def _run_batches(fn: Callable, items: list, batch_size: int, on_batch: Callable[
                 results.extend(future.result())
             except Exception as exc:
                 failures.append((futures[future], exc))
-            done += 1
-            on_batch(done, len(batches))
     if failures and len(failures) == len(batches):
         raise failures[0][1]
     return results, failures
+
+
+def _split(items: list, size: int) -> list[list]:
+    """Split into the fewest batches of at most `size`, evenly (48 -> 12, 12, 12, 12), so no batch is tiny."""
+    if not items:
+        return []
+    count = -(-len(items) // size)
+    base, extra = divmod(len(items), count)
+    batches, start = [], 0
+    for i in range(count):
+        end = start + base + (1 if i < extra else 0)
+        batches.append(items[start:end])
+        start = end
+    return batches
 
 
 def _papers(n: int) -> str:
@@ -315,8 +332,6 @@ def _screen(profile: dict[str, Any], emit: Emit, fetched: bool) -> None:
         return
 
     cached = store.get_screening([p["id"] for p in papers], key)
-    screener = Screener(profile)
-
     to_screen = [p for p in papers if p["id"] not in cached]
     unscored = [p for p in papers if cached.get(p["id"], {}).get("passed") and cached[p["id"]]["score"] is None]
     if to_screen or unscored or fetched:
@@ -325,49 +340,110 @@ def _screen(profile: dict[str, Any], emit: Emit, fetched: bool) -> None:
             "step", "Check the screening cache",
             summary=f"{done} of {len(papers)} papers already screened under these interests",
         ).finish()
+    if not to_screen and not unscored:
+        return
 
-    if to_screen:
-        batches = -(-len(to_screen) // TITLE_BATCH_SIZE)
+    # Work items: (name, where, titles to screen, papers already past the title screen).
+    # Papers that passed the title screen last time but have no score yet go first.
+    title_batches = _split(to_screen, TITLE_BATCH_SIZE)
+    work = [(f"{_papers(len(unscored))} left unscored last time", "left from last time", [], unscored)] if unscored else []
+    work += [
+        (f"Batch {i} of {len(title_batches)}: {len(batch)} titles", f"batch {i} of {len(title_batches)}", batch, [])
+        for i, batch in enumerate(title_batches, 1)
+    ]
+    tally = _Tally(profile, emit, total=len(to_screen) + len(unscored))
+    screener = Screener(profile)
+    tally.progress()
 
-        def on_titles(done: int, total: int) -> None:
-            emit({
-                "type": "progress", "stage": "titles", "done": done, "total": total,
-                "text": f"Reading {len(to_screen)} titles",
-            })
-
-        on_titles(0, batches)
-        with activity.span("group", "Pass 1: title screen") as group:
-            outcomes, failures = _run_batches(screener.screen_titles, to_screen, TITLE_BATCH_SIZE, on_titles)
-            kept = sum(1 for _, passed in outcomes if passed)
+    def screen_batch(name: str, where: str, titles: list[dict[str, Any]], survivors: list[dict[str, Any]]) -> None:
+        with activity.span("group", name) as group:
+            notes = []
+            if titles:
+                try:
+                    outcomes = screener.screen_titles(titles, where)
+                except Exception as exc:
+                    tally.failed("titles", titles, exc)
+                    group.finish("error", summary=f"title screen failed: {describe_error(exc)}")
+                    return
+                store.save_title_screen(outcomes, key)
+                passed = {paper_id for paper_id, ok in outcomes if ok}
+                survivors = survivors + [p for p in titles if p["id"] in passed]
+                tally.titles_done(len(titles), len(passed))
+                notes.append(f"kept {len(passed)} of {len(titles)} titles")
+            parts = _split(survivors, ABSTRACT_BATCH_SIZE)
+            scored = shown = failed = 0
+            for i, part in enumerate(parts, 1):
+                try:
+                    scores = screener.score_abstracts(part, f"{where}, part {i} of {len(parts)}" if len(parts) > 1 else where)
+                except Exception as exc:
+                    tally.failed("scores", part, exc)
+                    failed += 1
+                    continue
+                store.save_scores(scores, key)
+                scored += len(scores)
+                shown += sum(1 for score in scores if score["score"] >= MIN_SCORE)
+                tally.scores_done(part, scores)
+            if parts:
+                notes.append(f"scored {scored}, {shown} at {MIN_SCORE}+")
             group.finish(
-                "error" if failures else "ok",
-                summary=f"read {len(outcomes)} titles, kept {kept}" + _failed_note(failures),
+                "error" if failed else "ok",
+                summary="; ".join(notes) + (f"; {failed} of {len(parts)} scoring batches failed" if failed else ""),
             )
-        _record_failures("Title screen", failures, batches)
-        store.save_title_screen(outcomes, key)
-        cached = store.get_screening([p["id"] for p in papers], key)
 
-    to_score = [p for p in papers if cached.get(p["id"], {}).get("passed") and cached[p["id"]]["score"] is None]
-    if to_score:
-        batches = -(-len(to_score) // ABSTRACT_BATCH_SIZE)
+    # With room for one request at a time, a single worker takes the batches in order
+    with ThreadPoolExecutor(max_workers=gateway.allowance.parallel(MAX_OUTPUT_TOKENS, MAX_WORKERS)) as pool:
+        # Each batch runs in a copy of this context, so its log entries land in the current run
+        futures = [pool.submit(contextvars.copy_context().run, screen_batch, *item) for item in work]
+        for future in futures:
+            future.result()
 
-        def on_scores(done: int, total: int) -> None:
-            emit({
-                "type": "progress", "stage": "abstracts", "done": done, "total": total,
-                "text": f"Scoring {len(to_score)} abstracts",
-            })
+    _record_failures("Title screen", tally.title_failures, len(title_batches))
+    _record_failures("Abstract scoring", tally.score_failures, tally.score_batches)
+    screener.record_skipped()
+    if tally.succeeded == 0 and (tally.title_failures or tally.score_failures):
+        raise (tally.title_failures or tally.score_failures)[0][1]
 
-        on_scores(0, batches)
-        with activity.span("group", "Pass 2: abstract scoring") as group:
-            scores, failures = _run_batches(screener.score_abstracts, to_score, ABSTRACT_BATCH_SIZE, on_scores)
-            shown = sum(1 for s in scores if s["score"] >= MIN_SCORE)
-            group.finish(
-                "error" if failures else "ok",
-                summary=f"scored {len(scores)} abstracts, {shown} at {MIN_SCORE}+" + _failed_note(failures),
-            )
-        _record_failures("Abstract scoring", failures, batches)
-        screener.record_skipped()
-        store.save_scores(scores, key)
+
+class _Tally:
+    """Progress across batch threads: papers screened so far, failures, and the feed after each scored batch."""
+
+    def __init__(self, profile: dict[str, Any], emit: Emit, total: int):
+        self.profile, self.emit, self.total = profile, emit, total
+        self.done = self.shown = self.succeeded = self.score_batches = 0
+        self.title_failures: list = []
+        self.score_failures: list = []
+        self._lock = Lock()
+
+    def progress(self) -> None:
+        with self._lock:
+            text = f"{_papers(self.shown)} worth a look so far" if self.shown else f"Reading {_papers(self.total)}"
+            event = {"type": "progress", "stage": "screen", "unit": "papers", "done": self.done, "total": self.total, "text": text}
+        self.emit(event)
+
+    def titles_done(self, read: int, kept: int) -> None:
+        with self._lock:
+            self.done += read - kept  # dropped titles are finished; kept ones finish when scored
+            self.succeeded += 1
+        self.progress()
+
+    def scores_done(self, part: list[dict[str, Any]], scores: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self.done += len(part)
+            self.shown += sum(1 for score in scores if score["score"] >= MIN_SCORE)
+            self.succeeded += 1
+            self.score_batches += 1
+        self.emit({"type": "feed", "feed": get_feed(self.profile)})
+        self.progress()
+
+    def failed(self, stage: str, batch: list[dict[str, Any]], exc: Exception) -> None:
+        with self._lock:
+            self.done += len(batch)
+            if stage == "titles":
+                self.title_failures.append((batch, exc))
+            else:
+                self.score_failures.append((batch, exc))
+                self.score_batches += 1
+        self.progress()
 
 
 def get_feed(profile: dict[str, Any]) -> dict[str, Any]:
@@ -430,7 +506,7 @@ def get_report(profile: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
 def rescore(profile: dict[str, Any], papers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Score papers under a (possibly unsaved) profile without caching. Used to test edits."""
     screener = Screener(profile, draft=True)
-    results, failures = _run_batches(screener.score_abstracts, papers, ABSTRACT_BATCH_SIZE, lambda done, total: None)
-    _record_failures("Scoring under the draft", failures, -(-len(papers) // ABSTRACT_BATCH_SIZE))
+    results, failures = _run_batches(screener.score_abstracts, papers, ABSTRACT_BATCH_SIZE)
+    _record_failures("Scoring under the draft", failures, len(_split(papers, ABSTRACT_BATCH_SIZE)))
     screener.record_skipped()
     return {r["paper_id"]: r for r in results}

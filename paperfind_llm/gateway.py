@@ -9,6 +9,11 @@ this module never resends a request: a failure is logged and shown instead.
 
 call() logs each request for the Agent log: what it was for, the model, latency,
 tokens, the reported cost, why it stopped, and the full prompt and raw reply.
+
+While a request runs, the broker holds its worst-case cost against the visit's
+allowance: the whole context window at the input price plus max_tokens at the
+output price. A small allowance fits only one such hold at a time, so call()
+waits for room instead of sending a request the broker would refuse.
 """
 
 import json
@@ -17,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any, Optional, TypeVar
 from urllib.parse import urlsplit
 
@@ -29,6 +34,7 @@ CONTRACT_VERSION = "workshop.app.v1"
 TIMEOUT_SECONDS = 90  # hosted requests have a 90-second deadline
 MAX_PROMPT_BLOCK_CHARS = 4000  # per message, in the logged prompt
 MANIFEST_PATH = Path(__file__).resolve().parent.parent / "workshop-app.json"
+DEFAULT_MAX_TOKENS = 4096
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
@@ -49,6 +55,15 @@ class Selection:
     model: str
     profile: str
     funding: Optional[str]
+    label: str = ""
+    context_hold_usd: Optional[float] = None  # the context window at the input price
+    output_usd_per_token: Optional[float] = None
+
+    def hold_usd(self, max_tokens: int) -> Optional[float]:
+        """What the broker holds while a request with this max_tokens runs, if the profile is priced."""
+        if self.context_hold_usd is None or self.output_usd_per_token is None:
+            return None
+        return self.context_hold_usd + max_tokens * self.output_usd_per_token
 
 
 _selection: Optional[Selection] = None
@@ -133,9 +148,98 @@ def bootstrap() -> Selection:
     allowed = _manifest_models()
     if allowed and chosen["modelId"] not in allowed:
         raise GatewayError(f"The selected model {chosen['modelId']} isn't one this app declares.", code="MODEL")
+    profile = next((p for p in inference.get("profiles") or [] if p.get("id") == chosen["profileId"]), {})
+    context_tokens = _number(profile.get("contextTokens"))
+    input_price = _number(profile.get("maxInputUsdPerToken", profile.get("inputUsdPerToken")))
+    output_price = _number(profile.get("maxOutputUsdPerToken", profile.get("outputUsdPerToken")))
+    allowance.refresh(boot.get("usage") or {})
     with _selection_lock:
-        _selection = Selection(chosen["modelId"], chosen["profileId"], inference.get("fundingMode"))
+        _selection = Selection(
+            chosen["modelId"],
+            chosen["profileId"],
+            inference.get("fundingMode"),
+            label=profile.get("label") or "",
+            context_hold_usd=context_tokens * input_price if context_tokens is not None and input_price is not None else None,
+            output_usd_per_token=output_price,
+        )
         return _selection
+
+
+def _number(value: Any) -> Optional[float]:
+    """A count or USD amount from the bootstrap (prices arrive as decimal strings)."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+class Allowance:
+    """The visit's model allowance, as the gateway reported it, less the holds of requests in flight."""
+
+    def __init__(self) -> None:
+        self._changed = Condition()
+        self.limit_usd: Optional[float] = None
+        self.available_usd: Optional[float] = None  # not counting our own holds
+        self._held = 0.0
+        self._running = 0
+
+    def refresh(self, usage: dict[str, Any]) -> None:
+        available = _number(usage.get("availableUsd"))
+        with self._changed:
+            self.limit_usd = _number(usage.get("limitUsd"))
+            # The gateway's figure already excludes the holds of our requests still running
+            self.available_usd = None if available is None else available + self._held
+            self._changed.notify_all()
+
+    def acquire(self, hold: Optional[float], model_label: str) -> None:
+        """Wait until the allowance has room for this hold. Raises if it can't fit even on its own."""
+        if hold is None:
+            return
+        with self._changed:
+            while self.available_usd is not None and self._held + hold > self.available_usd + 1e-9:
+                if not self._running:
+                    raise GatewayError(
+                        f"Only ${max(0.0, self.available_usd):.2f} of model allowance is left, but each {model_label or 'model'} request "
+                        f"needs a temporary ${hold:.2f} hold while it runs, so no more requests can start. "
+                        + ("Choose a model with a smaller hold in the class app store, or start a new visit."
+                           if config.HOSTED else
+                           "Choose a model with a smaller hold, or create a token with a higher ceiling, in the class app store (Account)."),
+                        code="ALLOWANCE_LOW",
+                    )
+                self._changed.wait()
+            self._held += hold
+            self._running += 1
+
+    def parallel(self, max_tokens: int, most: int) -> int:
+        """How many requests of this size to run at once (1 to `most`): as many holds as the allowance fits now."""
+        chosen = _selection
+        hold = chosen.hold_usd(max_tokens) if chosen else None
+        with self._changed:
+            if hold is None or self.available_usd is None:
+                return most
+            return max(1, min(most, int((self.available_usd - self._held) // hold)))
+
+    def release(self, hold: Optional[float], cost_usd: Optional[float]) -> None:
+        if hold is None:
+            return
+        with self._changed:
+            self._held -= hold
+            self._running -= 1
+            if self.available_usd is not None and cost_usd:
+                self.available_usd -= cost_usd
+            self._changed.notify_all()
+
+    def to_dict(self) -> dict[str, Any]:
+        hold = _selection.hold_usd(DEFAULT_MAX_TOKENS) if _selection else None
+        with self._changed:
+            return {
+                "limit_usd": self.limit_usd,
+                "available_usd": None if self.available_usd is None else round(max(0.0, self.available_usd), 4),  # holds aside
+                "hold_usd": None if hold is None else round(hold, 4),
+            }
+
+
+allowance = Allowance()
 
 
 def selection() -> Selection:
@@ -156,7 +260,7 @@ def describe_error(exc: Exception) -> str:
         if exc.code in ("SESSION_EXPIRED", "SESSION_REVOKED") or exc.status == 401:
             return "The gateway token expired or was revoked. Create a new one in the class app store (Account), or start a new visit."
         if exc.code == "ALLOWANCE_EXHAUSTED" or exc.status == 402:
-            return "This visit's model allowance is used up."
+            return f"Not enough model allowance left. {exc}"
         if exc.code == "RATE_LIMITED":
             return f"The gateway is limiting requests right now: {exc}"
         if exc.code == "CONCURRENCY_LIMIT":
@@ -172,7 +276,7 @@ def call(
     messages: list[dict[str, Any]],
     tools: Optional[list[dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
-    max_tokens: int = 4096,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict[str, Any]:
     """Make one model request through the gateway and log it. Returns the Chat Completions response."""
     chosen = selection()
@@ -180,6 +284,21 @@ def call(
     if tools:
         body["tools"] = tools
         body["tool_choice"] = tool_choice or "auto"
+    hold = chosen.hold_usd(max_tokens)
+    try:
+        allowance.acquire(hold, chosen.label)  # waits while other requests' holds fill the allowance
+    except GatewayError as exc:
+        activity.begin("llm", purpose, model=chosen.model).finish("error", error=describe_error(exc), detail=[_prompt_section(body)])
+        raise
+    response: dict[str, Any] = {}
+    try:
+        response = _send(purpose, body, chosen)
+        return response
+    finally:
+        allowance.release(hold, usage_numbers(response.get("usage") or {})["cost_usd"])
+
+
+def _send(purpose: str, body: dict[str, Any], chosen: Selection) -> dict[str, Any]:
     event = activity.begin("llm", purpose, model=chosen.model)
     try:
         response = _request("POST", "/v1/llm/chat/completions", body, chosen.profile)
@@ -211,7 +330,7 @@ def reply_text(response: dict[str, Any]) -> str:
     return (response["choices"][0]["message"].get("content") or "").strip()
 
 
-def call_json(purpose: str, *, system: str, user: str, output: type[OutputT], max_tokens: int = 4096) -> tuple[dict[str, Any], OutputT]:
+def call_json(purpose: str, *, system: str, user: str, output: type[OutputT], max_tokens: int = DEFAULT_MAX_TOKENS) -> tuple[dict[str, Any], OutputT]:
     """One request whose reply must be a JSON object matching `output`. Raises ReplyError otherwise."""
     response = call(
         purpose,
@@ -273,10 +392,13 @@ def _prompt_section(body: dict[str, Any]) -> dict[str, Any]:
     return activity.section("Prompt", "\n\n".join(parts))
 
 
+PRIVATE_FIELDS = ("reasoning", "reasoning_content", "reasoning_details")
+
+
 def _clean(value: Any) -> Any:
-    """Drop nulls from a raw reply, for reading."""
+    """Drop nulls from a raw reply, for reading. The model's private reasoning is left out."""
     if isinstance(value, dict):
-        return {k: _clean(v) for k, v in value.items() if v is not None}
+        return {k: "(not shown)" if k in PRIVATE_FIELDS else _clean(v) for k, v in value.items() if v is not None}
     if isinstance(value, list):
         return [_clean(v) for v in value]
     return value
@@ -290,12 +412,14 @@ def _clean(value: Any) -> Any:
 def usage_numbers(usage: dict[str, Any]) -> dict[str, Any]:
     """Token counts and the cost the gateway reported for one response (None if it reported none)."""
     prompt = int(usage.get("prompt_tokens") or 0)
-    cached = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or 0)
+    written = int(details.get("cache_write_tokens") or 0)
     cost = next((usage[k] for k in ("cost", "cost_usd", "total_cost") if isinstance(usage.get(k), (int, float))), None)
     return {
-        "input_tokens": max(0, prompt - cached),
+        "input_tokens": max(0, prompt - cached - written),
         "cache_read_tokens": cached,
-        "cache_write_tokens": 0,
+        "cache_write_tokens": written,
         "output_tokens": int(usage.get("completion_tokens") or 0),
         "cost_usd": float(cost) if cost is not None else None,
     }
@@ -309,6 +433,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     cost_usd: float = 0.0
     unpriced: int = 0  # requests whose cost the gateway didn't report
 
@@ -323,6 +448,7 @@ class Usage:
             self.input_tokens += numbers["input_tokens"]
             self.output_tokens += numbers["output_tokens"]
             self.cache_read_tokens += numbers["cache_read_tokens"]
+            self.cache_write_tokens += numbers["cache_write_tokens"]
             if numbers["cost_usd"] is None:
                 self.unpriced += 1
             else:
@@ -336,7 +462,7 @@ class Usage:
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
                 "cache_read_tokens": self.cache_read_tokens,
-                "cache_write_tokens": 0,
+                "cache_write_tokens": self.cache_write_tokens,
                 "cost_usd": round(self.cost_usd, 4),
                 "unpriced": self.unpriced,
             }

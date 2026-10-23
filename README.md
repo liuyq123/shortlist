@@ -22,7 +22,7 @@ It opens `http://localhost:8080`. Requests use the token's model and spend its a
 
 ## What to try
 
-1. **Pick a sample researcher**, e.g. *LLM reasoning & agents*. Today's papers in its arXiv categories are screened and ranked in about 30 seconds.
+1. **Pick a sample researcher**, e.g. *LLM reasoning & agents*. Today's papers in its arXiv categories are screened and ranked. The first papers appear in about 15 seconds and the rest fill in as each batch is scored.
 2. **Read the reasons.** Each paper card says which of your interests it matches and why. The line above the feed shows the funnel: *442 new papers → 118 passed the title screen → 102 worth a look*.
 3. **Disagree with it.** Click **Not for me…** on a paper, or type something like *"Too many papers that just benchmark existing models. I want new methods."* Watch the assistant:
    - read your feed and the screener's reasons,
@@ -45,13 +45,14 @@ Nothing fails silently: a failed batch, a declined or unreadable reply, or paper
 arXiv RSS (today's new papers in your categories)
         │
         ▼
-Pass 1: title screen      150 titles per request, keeps anything plausibly relevant
+Pass 1: title screen      ~150 titles per request, keeps anything plausibly relevant
+        │                 (each title batch goes straight on to pass 2)
+        ▼
+Pass 2: abstract scoring  ≤15 abstracts per request → score 0–10, interest, reason
         │
         ▼
-Pass 2: abstract scoring  15 abstracts per request → score 0–10, interest, reason
-        │
-        ▼
-Feed (score ≥ 4), cached per (paper, profile version) so nothing is screened twice
+Feed (score ≥ 4), updated after every scored batch,
+cached per (paper, profile version) so nothing is screened twice
         ▲
         │ edits, after you approve
 Assistant                 the same model with 12 tools: inspect feed/votes/papers,
@@ -59,10 +60,11 @@ Assistant                 the same model with 12 tools: inspect feed/votes/paper
 ```
 
 - **Interest profile.** 3–8 themes, each with a specific description, plus a "not interested" list and arXiv categories. The model builds it from your description and papers. It is the only thing that controls the feed, which keeps the system explainable: every score cites an interest.
-- **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about a quarter survive), and only the survivors get their abstracts read. A day of ~450 papers takes about 11 requests.
+- **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about a quarter survive), and only the survivors get their abstracts read. A day of ~450 papers takes about 12 requests.
 - **The assistant is an agent, not a single prompt.** It decides what to look at, forms a hypothesis about what in the profile caused the problem, makes an edit, and checks it with `test_draft` before proposing it. Nothing is saved until you click Apply. Its last allowed turn must answer without tools.
 - **Structured replies are checked by the app.** Screening and profile building ask for JSON, validated before use. An unreadable reply gets one fresh request; a failed gateway request is never resent, because the broker owns retries.
-- **One gateway wrapper** (`gateway.call`) makes every model request with the visitor's selected model and profile, and records the prompt, raw reply, tokens, and reported cost for the Agent log.
+- **One gateway wrapper** (`gateway.call`) makes every model request with the visitor's selected model and profile, and records the prompt, raw reply, tokens, and reported cost for the Agent log. The model's private reasoning is left out of the log.
+- **Requests fit the allowance.** While a request runs, the gateway holds its worst-case cost against the allowance: the model's whole context window at the input price plus `max_tokens` at the output price (about $0.56 for Claude Haiku 5.5). The app reads the prices and the allowance left from `/v1/bootstrap` and runs batches in parallel only when the allowance can hold several requests at once; otherwise it runs them one at a time, in order, so the first papers still come quickly. When even one request no longer fits, it says so instead of sending a request the gateway would refuse. Hover over the cost in the top bar to see the allowance left.
 
 ## Publish to the class app store
 
@@ -112,6 +114,7 @@ paperfind_llm/
 
 - arXiv only. The RSS feed has one announcement a day, so a visit sees today's papers. On weekends it falls back to arXiv's search API, which is rate-limited.
 - One model, the one selected in the class app store, does the screening, profile building, and the assistant. Smaller models give rougher scores and weaker assistant edits.
+- A small allowance means one request at a time, so a full day's screen takes about 90 seconds with Claude Haiku 5.5 (about 30 seconds when three fit). A development token's ceiling also has to cover each request's hold, not just its cost: with a $0.65 ceiling, Haiku requests stop once about $0.09 has been spent.
 - LLM scores vary a little between runs, so papers near the cutoff (scores 4–5) can move in or out when the feed is re-screened.
 - `test_draft` re-runs only the abstract pass. A draft that changes the title pass is checked when you apply it.
 - Everything (your interests, votes, the agent log) lasts for one hosted visit; the agent log also clears when a local server restarts.

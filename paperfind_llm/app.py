@@ -53,10 +53,15 @@ def _stream(job: Callable[[Emit], Optional[dict[str, Any]]]) -> StreamingRespons
 
     def lines():
         while (event := events.get()) is not None:
-            event["usage"] = session_usage.to_dict()
+            event["usage"] = _usage()
             yield json.dumps(event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
+
+
+def _usage() -> dict[str, Any]:
+    """What this session spent, and the allowance left for more requests."""
+    return {**session_usage.to_dict(), "allowance": gateway.allowance.to_dict()}
 
 
 def _require_profile() -> dict[str, Any]:
@@ -99,7 +104,7 @@ def state() -> dict[str, Any]:
         ],
         "categories": arxiv.CATEGORIES,
         "window_days": config.WINDOW_DAYS,
-        "usage": session_usage.to_dict(),
+        "usage": _usage(),
     }
 
 
@@ -192,7 +197,7 @@ def feed_report() -> dict[str, Any]:
 
 @app.get("/api/log")
 def log(since: int = 0) -> dict[str, Any]:
-    return {**activity.snapshot(since), "usage": session_usage.to_dict()}
+    return {**activity.snapshot(since), "usage": _usage()}
 
 
 @app.get("/api/log/events/{event_id}")

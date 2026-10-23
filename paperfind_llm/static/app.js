@@ -119,6 +119,18 @@ function setCost(usage) {
   } else {
     pill.innerHTML = `$${usage.cost_usd.toFixed(3)}<span class="pill-suffix"> spent</span>`;
   }
+  // Each running request holds its worst-case cost, so the allowance left decides how many run at once
+  const { available_usd: left, limit_usd: limit, hold_usd: hold } = usage.allowance || {};
+  let title = "Model spend since the app started, as the gateway reported it.";
+  if (left != null) {
+    title += ` Allowance left: ${fmtCost(left)}${limit != null ? ` of ${fmtCost(limit)}` : ""}.`;
+    if (hold) {
+      const fits = Math.floor(left / hold);
+      title += ` Each request holds up to ${fmtCost(hold)} while it runs, so ${fits ? `${plural(fits, "request")} can run at once` : "no more requests can start"}.`;
+    }
+  }
+  pill.title = `${title} Click for the agent log.`;
+  pill.classList.toggle("pill-warn", left != null && hold != null && left < hold);
 }
 
 function showConnection() {
@@ -311,7 +323,7 @@ function renderOnboarding() {
           <input type="file" id="file" accept=".bib,.ris,.txt">
         </div>
         <div class="row" style="margin-top:16px">
-          <span class="muted small">Takes about 30 seconds</span>
+          <span class="muted small">First papers in about 30 seconds</span>
           <div class="spacer"></div>
           <button class="btn primary" data-action="build" ${building ? "disabled" : ""}>Build my feed →</button>
         </div>
@@ -505,7 +517,7 @@ function renderFeed() {
   if (feed && !refreshing && !state.refreshError) html += problemsBanner(feed.stats);
   if (state.feedStale && !refreshing) {
     html += `<div class="banner">Your interests changed. Re-screen today's papers to see the effect.
-      <span class="muted small">About a minute.</span><div class="spacer"></div>
+      <span class="muted small">Papers appear as they're scored.</span><div class="spacer"></div>
       <button class="btn small primary" data-action="rescreen">Re-screen</button></div>`;
   }
 
@@ -528,15 +540,11 @@ function renderFeed() {
 function progressBox(event) {
   const determinate = event.total > 0 && event.done !== undefined;
   const pct = determinate ? Math.round((event.done / event.total) * 100) : 0;
-  const label = {
-    fetch: "Fetching",
-    titles: "Pass 1 · titles",
-    abstracts: "Pass 2 · abstracts",
-  }[event.stage] || "Working";
+  const label = { fetch: "Fetching", screen: "Screening" }[event.stage] || "Working";
   return `
     <div class="progress-box">
       <div class="progress-text"><span><b>${label}</b> · ${esc(event.text || "")}</span>
-        <span class="muted">${determinate ? `${event.done}/${event.total} batches` : ""}</span></div>
+        <span class="muted">${determinate ? `${event.done}/${event.total} ${event.unit || "batches"}` : ""}</span></div>
       <div class="bar ${determinate ? "" : "indeterminate"}"><div style="width:${determinate ? pct : 35}%"></div></div>
       ${state.refreshRunId ? logLink(state.refreshRunId, "Watch each request in the agent log") : ""}
     </div>`;
@@ -653,6 +661,11 @@ async function refreshFeed({ force = false, afterChange = false } = {}) {
       }
       if (event.type === "progress") {
         state.refresh = event;
+        renderFeed();
+      }
+      // The feed so far, sent after each scored batch, so papers appear while the rest are screened
+      if (event.type === "feed") {
+        state.feed = event.feed;
         renderFeed();
       }
     });
