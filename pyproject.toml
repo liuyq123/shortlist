@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperfind-llm"
+version = "0.1.0"
+description = "Daily paper recommendations screened by Claude, tuned by talking to an agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=2.1.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.23.0",
+    "python-dotenv>=1.0.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+paperfind-llm = "paperfind_llm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["paperfind_llm*"]
+
+[tool.setuptools.package-data]
+paperfind_llm = ["static/*", "personas.json"]

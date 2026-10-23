@@ -1,0 +1,100 @@
+[
+  {
+    "id": "llm-reasoning",
+    "label": "LLM reasoning & agents",
+    "blurb": "Test-time compute, RL fine-tuning, tool-using agents",
+    "profile": {
+      "description": "I study how large language models reason and act: test-time compute, RL fine-tuning for reasoning, and agents that use tools.",
+      "themes": [
+        {"name": "Reasoning and test-time compute", "description": "Methods that improve LLM reasoning at inference time: chain-of-thought, search over reasoning paths, self-verification, and scaling laws for test-time compute.", "examples": []},
+        {"name": "RL fine-tuning of LLMs", "description": "Reinforcement learning to train language models, including RLHF, RL from verifiable rewards, reward modeling, and the stability of policy-gradient methods for LLMs.", "examples": []},
+        {"name": "Tool-using agents", "description": "LLM agents that call tools, browse, or write code over many steps, and the benchmarks and environments used to evaluate them.", "examples": []},
+        {"name": "Efficient LLM inference", "description": "Making LLM inference cheaper or faster: quantization, speculative decoding, KV-cache compression, and efficient serving.", "examples": []}
+      ],
+      "not_interested": [
+        "Papers that only apply an off-the-shelf LLM to a domain task (law, medicine, education) without new methods",
+        "Prompt-engineering case studies",
+        "Computer vision papers unless they involve language-model reasoning"
+      ],
+      "categories": ["cs.CL", "cs.LG", "cs.AI"]
+    }
+  },
+  {
+    "id": "drug-discovery",
+    "label": "ML for drug discovery",
+    "blurb": "Docking, molecular generation, protein design",
+    "profile": {
+      "description": "I work on machine learning for small-molecule drug discovery and protein design.",
+      "themes": [
+        {"name": "Structure-based virtual screening", "description": "Docking, scoring functions, and ML models that rank compounds against a protein target, including benchmarks and analyses of why screening succeeds or fails.", "examples": []},
+        {"name": "Generative molecular design", "description": "Models that generate or optimize small molecules (diffusion, language models, RL) under property or binding constraints.", "examples": []},
+        {"name": "Protein structure and design", "description": "Predicting protein structures and complexes, and designing new proteins or binders with deep learning.", "examples": []},
+        {"name": "Molecular property prediction", "description": "Predicting ADMET, solubility, or activity from molecular structure, especially with graph neural networks or foundation models.", "examples": []}
+      ],
+      "not_interested": [
+        "Clinical trial or epidemiology studies",
+        "Materials science papers without biological targets",
+        "General graph neural network papers not applied to molecules"
+      ],
+      "categories": ["q-bio.BM", "q-bio.QM", "cs.LG", "physics.chem-ph"]
+    }
+  },
+  {
+    "id": "robot-learning",
+    "label": "Robot learning",
+    "blurb": "VLA models, imitation learning, manipulation",
+    "profile": {
+      "description": "I work on learning-based robot manipulation.",
+      "themes": [
+        {"name": "Vision-language-action models", "description": "Large pretrained policies that map images and language instructions to robot actions, and how to train, fine-tune, or evaluate them.", "examples": []},
+        {"name": "Imitation learning", "description": "Learning manipulation policies from human or teleoperated demonstrations, including diffusion policies and data collection systems.", "examples": []},
+        {"name": "Sim-to-real reinforcement learning", "description": "Training robot policies with RL in simulation and transferring them to real hardware.", "examples": []},
+        {"name": "Dexterous manipulation", "description": "Multi-fingered hands and contact-rich tasks such as in-hand reorientation and tool use.", "examples": []}
+      ],
+      "not_interested": [
+        "Autonomous driving",
+        "Classical motion planning without learning",
+        "Drone and legged locomotion papers"
+      ],
+      "categories": ["cs.RO", "cs.LG", "cs.CV"]
+    }
+  },
+  {
+    "id": "single-cell",
+    "label": "Single-cell & spatial omics",
+    "blurb": "Foundation models, spatial transcriptomics, perturbations",
+    "profile": {
+      "description": "I develop computational methods for single-cell and spatial transcriptomics.",
+      "themes": [
+        {"name": "Single-cell foundation models", "description": "Large pretrained models of single-cell gene expression, how they are trained, and evaluations of whether they beat simple baselines.", "examples": []},
+        {"name": "Spatial transcriptomics methods", "description": "Computational methods for spatially resolved transcriptomics: cell segmentation, deconvolution, spatial domains, and cell-cell communication.", "examples": []},
+        {"name": "Perturbation modeling", "description": "Predicting the effects of genetic or chemical perturbations on cells, including Perturb-seq analysis and in-silico perturbation models.", "examples": []}
+      ],
+      "not_interested": [
+        "Bulk RNA-seq differential expression studies",
+        "Population genetics and evolution",
+        "Medical imaging without molecular data"
+      ],
+      "categories": ["q-bio.GN", "q-bio.QM", "q-bio.CB", "cs.LG"]
+    }
+  },
+  {
+    "id": "neuro",
+    "label": "Computational neuroscience",
+    "blurb": "Neural dynamics, learning rules, brain-like models",
+    "profile": {
+      "description": "I study neural computation with models and data.",
+      "themes": [
+        {"name": "Neural population dynamics", "description": "Low-dimensional dynamics and latent-variable models of recorded neural populations.", "examples": []},
+        {"name": "Biologically plausible learning", "description": "Learning rules that could run in the brain, such as alternatives to backpropagation and synaptic plasticity models.", "examples": []},
+        {"name": "Deep networks as brain models", "description": "Comparing artificial neural networks with neural or behavioral data to test hypotheses about the brain.", "examples": []}
+      ],
+      "not_interested": [
+        "Clinical neurology and brain imaging diagnostics",
+        "Neuromorphic hardware engineering",
+        "Spiking network papers aimed only at efficiency"
+      ],
+      "categories": ["q-bio.NC", "cs.NE", "cs.LG"]
+    }
+  }
+]
