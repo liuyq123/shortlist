@@ -285,10 +285,16 @@ def call(
         body["tools"] = tools
         body["tool_choice"] = tool_choice or "auto"
     hold = chosen.hold_usd(max_tokens)
+    activity.check_stop()  # a stopped run starts no new requests; ones already sent still finish
     try:
         allowance.acquire(hold, chosen.label)  # waits while other requests' holds fill the allowance
     except GatewayError as exc:
         activity.begin("llm", purpose, model=chosen.model).finish("error", error=describe_error(exc), detail=[_prompt_section(body)])
+        raise
+    try:
+        activity.check_stop()  # the person may have pressed Stop while this request waited
+    except activity.Stopped:
+        allowance.release(hold, None)
         raise
     response: dict[str, Any] = {}
     try:

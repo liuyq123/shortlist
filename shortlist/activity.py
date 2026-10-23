@@ -19,6 +19,7 @@ import json
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from threading import Event as Flag
 from threading import Lock
 from typing import Any, Callable, Iterator, Optional
 
@@ -112,9 +113,11 @@ class Run:
     input: str = ""
     output: str = ""
     summary: str = ""
-    status: str = "running"  # running, done, or error
+    status: str = "running"  # running, done, stopped, or error
     error: str = ""
     ended: Optional[float] = None
+    ended_because: str = ""  # what ended the run, in plain words, e.g. "the model answered without requesting tools"
+    stop_requested: Flag = field(default_factory=Flag)
     keep_empty: bool = True
     events: list[Event] = field(default_factory=list)
     issues: list[dict[str, Any]] = field(default_factory=list)
@@ -137,6 +140,8 @@ class Run:
             "duration": round((self.ended or time.time()) - self.started, 3),
             "status": self.status,
             "error": self.error,
+            "ended_because": self.ended_because,
+            "stopping": self.status == "running" and self.stop_requested.is_set(),
             "input": self.input,
             "output": self.output,
             "summary": self.summary,
@@ -186,6 +191,9 @@ def run(
     token = _current_run.set(current)
     try:
         yield current
+    except Stopped:
+        _end(current, "stopped")
+        raise
     except Exception as exc:
         from shortlist.gateway import describe_error
 
@@ -204,6 +212,10 @@ def _end(run: Run, status: str, error: str = "") -> None:
             if event.status == "running":  # left open by an exception
                 event.status, event.ended = "error", now
         run.status, run.error, run.ended = status, error, now
+        if status == "stopped":
+            run.ended_because = "you stopped it" + (f" ({run.ended_because})" if run.ended_because else "")
+        elif status == "error":
+            run.ended_because = "an error stopped it"
         _changed(run)
         if not run.events and not run.issues and not run.keep_empty and status == "done":
             _drop(run.id)
@@ -211,6 +223,31 @@ def _end(run: Run, status: str, error: str = "") -> None:
 
 def current_run() -> Optional[Run]:
     return _current_run.get()
+
+
+class Stopped(Exception):
+    """The person stopped the run. Requests already sent still finish; no new ones start."""
+
+    def __init__(self) -> None:
+        super().__init__("Stopped.")
+
+
+def stop(run_id: int) -> bool:
+    """Ask a running run to stop before its next model request. Returns whether it was running."""
+    with _lock:
+        run = _runs.get(run_id)
+        if run is None or run.status != "running":
+            return False
+        run.stop_requested.set()
+        _changed(run)
+        return True
+
+
+def check_stop() -> None:
+    """Raise Stopped if the person asked the current run to stop."""
+    run = _current_run.get()
+    if run is not None and run.stop_requested.is_set():
+        raise Stopped
 
 
 def begin(kind: str, label: str, parent: Optional[Event] = None, **fields: Any) -> Event:

@@ -77,7 +77,7 @@ async function errorDetail(response) {
   }
 }
 
-// POST to a streaming endpoint; calls onEvent for each event and returns the final "done" event.
+// POST to a streaming endpoint; calls onEvent for each event and returns the final "done" or "stopped" event.
 async function streamEvents(path, options, onEvent) {
   const response = await fetch(path, { method: "POST", ...options });
   if (!response.ok) throw new Error(await errorDetail(response));
@@ -97,7 +97,7 @@ async function streamEvents(path, options, onEvent) {
       const event = JSON.parse(line);
       if (event.usage) setCost(event.usage);
       if (event.type === "error") throw new Error(event.message);
-      if (event.type === "done") final = event;
+      if (event.type === "done" || event.type === "stopped") final = event;
       else onEvent(event);
     }
   }
@@ -106,6 +106,16 @@ async function streamEvents(path, options, onEvent) {
 }
 
 const jsonBody = (body) => ({ headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// Stop takes effect before the run's next model request; a request already sent still finishes
+async function stopRun(runId) {
+  if (!runId) return;
+  try {
+    await api(`/api/runs/${runId}/stop`, { method: "POST" });
+  } catch (err) {
+    toast(err.message);
+  }
+}
 
 // ============================================================================
 // Helpers
@@ -311,9 +321,16 @@ function renderOnboarding() {
   $("#app").innerHTML = `
     <div class="center-wrap">
       <div class="hero">
-        <h1>What do you research?</h1>
-        <p>Tell Shortlist in a sentence or two and add a few papers you like. The model turns that into an interest profile, then reads every new arXiv paper for you.</p>
+        <h1>Today's arXiv, read for you</h1>
+        <p>Pick a sample researcher to see their feed, or describe your own research below. Shortlist screens every new paper in your fields and says why each one made the cut.</p>
       </div>
+      <div class="personas">
+        ${state.personas.map((p) => `
+          <button class="persona" data-action="persona" data-id="${esc(p.id)}" ${building ? "disabled" : ""}>
+            <b>${esc(p.label)}</b><span>${esc(p.blurb)}</span>
+          </button>`).join("")}
+      </div>
+      <div class="divider">or describe your own research</div>
       <div class="card-box">
         <label class="field-label" for="desc">Your research</label>
         <textarea id="desc" rows="3" placeholder="e.g. I work on RL fine-tuning of language models for math reasoning, and on making inference cheaper with quantization.">${keep("desc")}</textarea>
@@ -330,13 +347,6 @@ function renderOnboarding() {
         ${steps ? `<ul class="steps build-steps">${steps}</ul>` : ""}
         ${state.build?.runId ? logLink(state.build.runId, "Watch it in the agent log") : ""}
         ${state.build?.error ? `<div class="banner error" style="margin-top:12px">${esc(state.build.error)}</div>` : ""}
-      </div>
-      <div class="divider">or try a sample researcher</div>
-      <div class="personas">
-        ${state.personas.map((p) => `
-          <button class="persona" data-action="persona" data-id="${esc(p.id)}" ${building ? "disabled" : ""}>
-            <b>${esc(p.label)}</b><span>${esc(p.blurb)}</span>
-          </button>`).join("")}
       </div>
     </div>`;
 }
@@ -546,7 +556,11 @@ function progressBox(event) {
       <div class="progress-text"><span><b>${label}</b> · ${esc(event.text || "")}</span>
         <span class="muted">${determinate ? `${event.done}/${event.total} ${event.unit || "batches"}` : ""}</span></div>
       <div class="bar ${determinate ? "" : "indeterminate"}"><div style="width:${determinate ? pct : 35}%"></div></div>
-      ${state.refreshRunId ? logLink(state.refreshRunId, "Watch each request in the agent log") : ""}
+      <div class="progress-foot">
+        ${state.refreshRunId ? logLink(state.refreshRunId, "Watch each request in the agent log") : ""}
+        <div class="spacer"></div>
+        ${state.refreshRunId ? `<button class="btn small" data-action="stop-refresh" ${state.refreshStopping ? "disabled" : ""}>${state.refreshStopping ? "Stopping after this request…" : "Stop"}</button>` : ""}
+      </div>
     </div>`;
 }
 
@@ -649,6 +663,7 @@ async function refreshFeed({ force = false, afterChange = false } = {}) {
   state.refresh = { stage: "start", text: "Checking for new papers" };
   state.refreshError = null;
   state.refreshRunId = null;
+  state.refreshStopping = false;
   const changed = afterChange || state.feedStale;
   if (!afterChange && !state.feedStale) state.prevScores = null;
   renderFeed();
@@ -669,8 +684,15 @@ async function refreshFeed({ force = false, afterChange = false } = {}) {
         renderFeed();
       }
     });
-    state.feed = final.feed;
-    state.refreshIssues = final.issues || [];
+    if (final.type === "stopped") {
+      // Batches scored before the stop are saved; the problems banner offers to screen the rest
+      state.feed = await api("/api/feed");
+      state.refreshIssues = [];
+      toast("Stopped. Papers screened so far are shown.");
+    } else {
+      state.feed = final.feed;
+      state.refreshIssues = final.issues || [];
+    }
     if (state.report) loadReport();
     const wasStale = state.feedStale;
     state.feedStale = false;
@@ -754,13 +776,19 @@ function botMessage(message, index) {
   return `
     <div class="msg-bot">
       ${steps.length ? `<ul class="steps">${steps.join("")}</ul>` : ""}
-      ${message.runId ? logLink(message.runId, message.running ? "Watch it in the agent log" : "Every request and tool call") : ""}
+      <div class="msg-links">
+        ${message.runId ? logLink(message.runId, message.running ? "Watch it in the agent log" : "Every request and tool call") : ""}
+        ${message.running && message.runId ? `<button class="link-btn" data-action="stop-assistant" data-index="${index}" ${message.stopping ? "disabled" : ""}>${message.stopping ? "Stopping after this request…" : "Stop"}</button>` : ""}
+      </div>
       ${message.tests ? testsTable(message.tests) : ""}
       ${message.reply ? `<div class="reply">${esc(message.reply)}</div>` : ""}
+      ${message.stopped ? `<div class="msg-stopped">Stopped. Nothing in your interests changed.</div>` : ""}
       ${message.error ? `<div class="msg-error">${esc(message.error)}</div>` : ""}
       ${message.proposal ? proposalCard(message, index) : ""}
     </div>`;
 }
+
+const EXPECT_TEXT = { drop: "should drop out", rise: "should rise in", stay: "should stay" };
 
 function testsTable(results) {
   const rows = results.map((r) => {
@@ -769,7 +797,11 @@ function testsTable(results) {
     let cls = "same";
     if (r.old_score !== null && r.new_score !== null) cls = r.new_score > r.old_score ? "up" : r.new_score < r.old_score ? "down" : "same";
     const vote = r.vote === "liked" ? `<span class="t-vote up">${ICON_UP}</span>` : r.vote === "disliked" ? `<span class="t-vote down">${ICON_DOWN}</span>` : "";
-    return `<tr><td class="t-title" title="${esc(r.new_reason || "")}">${vote}${esc(shortTitle(r.title, 64))}</td>
+    const mark = r.met === true ? "✓" : r.met === false ? "✗" : "?";
+    const expect = r.expect
+      ? `<div class="t-expect ${r.met === true ? "met" : r.met === false ? "missed" : ""}">${mark} ${EXPECT_TEXT[r.expect]}</div>`
+      : "";
+    return `<tr><td class="t-title" title="${esc(r.new_reason || "")}">${vote}${esc(shortTitle(r.title, 64))}${expect}</td>
       <td class="t-score"><span class="${cls}">${before} → ${after}</span></td></tr>`;
   }).join("");
   return `<table class="tests"><caption>Tested the draft on ${results.length} papers</caption>${rows}</table>`;
@@ -777,17 +809,29 @@ function testsTable(results) {
 
 function proposalCard(message, index) {
   const changes = message.proposal.changes.map(changeHtml).join("");
+  const check = message.proposal.check;
+  const doubtful = !check || ["fail", "unverified", "untested"].includes(check.status);
   let footer;
   if (message.proposalState === "applied") footer = `<div class="proposal-done">✓ Applied. Your feed was re-screened.</div>`;
   else if (message.proposalState === "discarded") footer = `<div class="proposal-done">Discarded.</div>`;
   else {
     footer = `
       <div class="proposal-actions">
-        <button class="btn small primary" data-action="apply" data-index="${index}">Apply & re-screen</button>
-        <button class="btn small" data-action="discard" data-index="${index}">Discard</button>
+        <button class="btn small ${doubtful ? "" : "primary"}" data-action="apply" data-index="${index}">${doubtful ? "Apply anyway" : "Apply & re-screen"}</button>
+        <button class="btn small ${doubtful ? "primary" : ""}" data-action="discard" data-index="${index}">Discard</button>
       </div>`;
   }
-  return `<div class="proposal"><div class="proposal-title">Proposed changes to your interests</div>${changes}${footer}</div>`;
+  return `<div class="proposal"><div class="proposal-title">Proposed changes to your interests</div>${changes}${check ? verdictBox(check) : ""}${footer}</div>`;
+}
+
+// The app's own check of the final draft: the assistant sorted each test paper before seeing a score
+function verdictBox(check) {
+  const icon = { pass: "✓", partial: "◐", fail: "✗" }[check.status] || "?";
+  return `
+    <div class="verdict verdict-${check.status}">
+      <div><b>${icon} ${esc(check.verdict)}</b> · ${esc(check.summary)}</div>
+      <div class="verdict-note">Checked by the app, not the assistant: it said what each paper should do before testing, and the final draft was scored.</div>
+    </div>`;
 }
 
 function changeHtml(change) {
@@ -830,8 +874,14 @@ async function ask(text) {
       if (event.type === "test") message.tests = event.results;
       renderAssistant();
     });
-    message.reply = final.reply;
-    message.proposal = final.proposal;
+    if (final.type === "stopped") {
+      message.stopped = true;
+    } else {
+      message.reply = final.reply;
+      message.proposal = final.proposal;
+      // The app's check scores every expectation under the final draft
+      if (final.proposal?.check?.checks.length) message.tests = final.proposal.check.checks;
+    }
   } catch (err) {
     message.error = err.message;
   }
@@ -1111,6 +1161,7 @@ function runItem(run) {
   let status = "";
   if (run.status === "running") status = `<span class="spinner" title="Running"></span>`;
   else if (run.status === "error") status = `<span class="run-flag error" title="${esc(run.error)}">Failed</span>`;
+  else if (run.status === "stopped") status = `<span class="run-flag">Stopped</span>`;
   else if (problems) status = `<span class="run-flag warn">${plural(problems, "problem")}</span>`;
   const running = run.status === "running";
   return `
@@ -1134,7 +1185,7 @@ function renderRunDetail() {
   const keepScroll = el.scrollTop;
   const sameRun = el.dataset.run === String(run.id);
   const t = run.totals;
-  const statusText = { running: "Running", done: "Done", error: "Failed" }[run.status];
+  const statusText = run.stopping ? "Stopping" : { running: "Running", done: "Done", stopped: "Stopped", error: "Failed" }[run.status];
   const issues = run.issues.length ? `
     <div class="issues">
       <b>${plural(run.issues.length, "problem")}</b>
@@ -1161,6 +1212,7 @@ function renderRunDetail() {
           <span>${costText(t.cost_usd, t.unpriced, t.requests)}</span>` : `<span>No model requests</span>`}
       </div>
       ${run.summary ? `<div class="run-summary">${esc(run.summary)}</div>` : ""}
+      ${run.status !== "running" && run.ended_because ? `<div class="run-ended">Ended because ${esc(run.ended_because)}.</div>` : ""}
       ${run.error ? `<div class="banner error">${esc(run.error)}</div>` : ""}
       ${issues}
     </div>
@@ -1388,6 +1440,13 @@ const actions = {
   tab: (el) => setTab(el.dataset.tab),
   "check-arxiv": () => refreshFeed({ force: true }),
   rescreen: () => refreshFeed(),
+  "stop-refresh": () => { state.refreshStopping = true; renderFeed(); stopRun(state.refreshRunId); },
+  "stop-assistant": (el) => {
+    const message = state.chat[Number(el.dataset.index)];
+    message.stopping = true;
+    renderAssistant();
+    stopRun(message.runId);
+  },
   filter: (el) => { state.filterTheme = el.dataset.id || null; renderFeed(); },
   "toggle-hidden": (el) => { state.showHidden = el.checked; renderFeed(); },
   "toggle-abstract": (el) => {

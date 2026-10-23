@@ -480,6 +480,21 @@ textarea { resize: vertical; }
 .status-done { color: var(--good); }
 .status-error { color: var(--bad); }
 .status-running { color: var(--accent); }
+.status-stopped { color: var(--muted); }
+.run-ended { margin-top: 8px; font-size: 13.5px; color: var(--muted); }
+.progress-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.msg-links { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.msg-stopped { margin-top: 8px; color: var(--muted); font-size: 14px; }
+.t-expect { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.t-expect.met { color: var(--good); }
+.t-expect.missed { color: var(--bad); }
+.verdict { margin: 12px 0 4px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); font-size: 13.5px; line-height: 1.45; }
+.verdict-pass b { color: var(--good); }
+.verdict-partial, .verdict-unverified, .verdict-untested { background: var(--warn-soft); }
+.verdict-partial b, .verdict-unverified b, .verdict-untested b { color: var(--warn); }
+.verdict-fail { background: var(--bad-soft); }
+.verdict-fail b { color: var(--bad); }
+.verdict-note { margin-top: 4px; font-size: 12px; color: var(--muted); }
 .run-summary { margin-top: 10px; font-size: 14px; padding: 8px 10px; background: var(--surface-2); border-radius: 8px; }
 .run-head .banner { margin: 10px 0 0; }
 .issues { margin-top: 10px; background: var(--warn-soft); border-radius: 8px; padding: 8px 12px; font-size: 13.5px; }

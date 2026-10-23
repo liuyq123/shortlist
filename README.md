@@ -28,11 +28,13 @@ It opens `http://localhost:8080`. Requests use the token's model and spend its a
    - read your feed and the screener's reasons,
    - work out which part of your profile let those papers in,
    - edit a draft of your profile,
-   - **re-score the affected papers under the draft** and show a before → after table,
-   - revise if the test shows collateral damage, then propose the change.
+   - say what each test paper should do (drop out, rise in, or stay), then **re-score them under the draft** and show a before → after table,
+   - revise if a paper misses, then propose the change.
+
+   Under the proposal, the app's own check gives a verdict, for example *Passed its check · 5 of 6 papers that don't belong drop below 4; 4 of 4 papers that should stay keep 4+ (2 you liked)*. If the check fails, the button says *Apply anyway*.
 4. **Apply** the proposal. The feed is re-screened and every card shows how its score moved (↑2, ↓5, *New in your feed*).
 5. Vote 👍/👎 on a few papers and click **Learn from my votes**, or ask **Why is #1 ranked first?**
-6. Open the **Agent log** (top bar) to watch every model request and tool call as it happens. Each request shows what it was for (*Title screen, batch 2 of 3*, *Assistant turn 4*), the model, latency, tokens, the cost the gateway reported, and why it stopped. Click a row for the full prompt and the raw reply. Tool calls show their arguments, result, and duration, nested under the model turn that asked for them.
+6. Open the **Agent log** (top bar) to watch every model request and tool call as it happens. Each request shows what it was for (*Title screen, batch 2 of 3*, *Assistant turn 4*), the model, latency, tokens, the cost the gateway reported, and why it stopped. Click a row for the full prompt and the raw reply. Tool calls show their arguments, result, and duration, nested under the model turn that asked for them. Each run also says what ended it, for example *the model answered without requesting a tool (turn 3 of 10)*. A running screen or assistant run has a **Stop** button, which takes effect before its next request.
 7. Click **Show what was filtered** above the feed to see every paper the screener dropped: titles cut at pass 1, and abstracts scored below 4 with the screener's reason. **I'd want this** turns a miss into feedback for the assistant.
 
 You can also edit themes, exclusions, and categories directly in the left panel.
@@ -62,9 +64,24 @@ Assistant                 the same model with 12 tools: inspect feed/votes/paper
 - **Interest profile.** 3–8 themes, each with a specific description, plus a "not interested" list and arXiv categories. The model builds it from your description and papers. It is the only thing that controls the feed, which keeps the system explainable: every score cites an interest.
 - **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about a quarter survive), and only the survivors get their abstracts read. A day of ~450 papers takes about 12 requests.
 - **The assistant is an agent, not a single prompt.** It decides what to look at, forms a hypothesis about what in the profile caused the problem, makes an edit, and checks it with `test_draft` before proposing it. Nothing is saved until you click Apply. Its last allowed turn must answer without tools.
+- **Proposals are checked by code, not by the assistant.** Before seeing a test result, the assistant sorts each test paper into *should drop*, *should rise* or *should stay*. When it finishes, the app scores the final draft on every one of those papers (re-scoring any it only tested on an earlier draft), always includes papers you liked as *should stay*, and attaches a verdict: passed, partly fixes it, failed, or nothing confirms the fix.
+- **Paper text is data.** Titles and abstracts come from third parties, so every prompt tells the model to treat them as data to judge, not instructions.
 - **Structured replies are checked by the app.** Screening and profile building ask for JSON, validated before use. An unreadable reply gets one fresh request; a failed gateway request is never resent, because the broker owns retries.
 - **One gateway wrapper** (`gateway.call`) makes every model request with the visitor's selected model and profile, and records the prompt, raw reply, tokens, and reported cost for the Agent log. The model's private reasoning is left out of the log.
 - **Requests fit the allowance.** While a request runs, the gateway holds its worst-case cost against the allowance: the model's whole context window at the input price plus `max_tokens` at the output price (about $0.56 for Claude Haiku 5.5). The app reads the prices and the allowance left from `/v1/bootstrap` and runs batches in parallel only when the allowance can hold several requests at once; otherwise it runs them one at a time, in order, so the first papers still come quickly. When even one request no longer fits, it says so instead of sending a request the gateway would refuse. Hover over the cost in the top bar to see the allowance left.
+
+## Design, in the workshop's terms
+
+| Dimension | Shortlist |
+|---|---|
+| Control | Screening is a fixed workflow: its steps are known (fetch, title screen, abstract scoring), so code runs them in order. The assistant is an agent loop: what it reads and how it edits depends on what it finds, and a test that misses sends it back to revise. |
+| Trigger | You: picking a profile, clicking Check arXiv, or sending a message. |
+| Authority | The assistant edits only a draft. Saving needs your Apply, after the app's check; Apply refuses if you edited your interests after the draft was made. |
+| Duration | Bounded: one screen, or one assistant run of at most 10 turns. Stop ends a run before its next request. |
+| Environment | Structured tools over the app's own data (feed, votes, papers, draft). Code fetches arXiv; the model never browses. |
+| Topology | One agent. The screener is a fixed workflow it reaches through `test_draft`, and the proposal check is code. |
+| Memory | Your profile, votes and screening cache, for the current visit. The assistant also sees the last few messages. |
+| Interface | Chat for feedback, plus direct actions: vote buttons, *Not for me…*, editable themes and exclusions. |
 
 ## Publish to the class app store
 

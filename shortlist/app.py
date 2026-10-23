@@ -35,7 +35,7 @@ Emit = Callable[[dict[str, Any]], None]
 
 
 def _stream(job: Callable[[Emit], Optional[dict[str, Any]]]) -> StreamingResponse:
-    """Run job(emit) in a thread and stream its events, then a final done/error event."""
+    """Run job(emit) in a thread and stream its events, then a final done, stopped or error event."""
     events: queue.Queue = queue.Queue()
 
     def run() -> None:
@@ -43,6 +43,8 @@ def _stream(job: Callable[[Emit], Optional[dict[str, Any]]]) -> StreamingRespons
             gateway.bootstrap()  # the visitor may have changed model or funding in the portal
             result = job(events.put) or {}
             events.put({"type": "done", **result})
+        except activity.Stopped:
+            events.put({"type": "stopped"})
         except Exception as exc:
             logger.exception("Job failed")
             events.put({"type": "error", "message": describe_error(exc)})
@@ -198,6 +200,12 @@ def feed_report() -> dict[str, Any]:
 @app.get("/api/log")
 def log(since: int = 0) -> dict[str, Any]:
     return {**activity.snapshot(since), "usage": _usage()}
+
+
+@app.post("/api/runs/{run_id}/stop")
+def stop_run(run_id: int) -> dict[str, Any]:
+    """Stop a run before its next model request. Requests already sent still finish."""
+    return {"stopping": activity.stop(run_id)}
 
 
 @app.get("/api/log/events/{event_id}")

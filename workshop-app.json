@@ -2,7 +2,7 @@
   "schemaVersion": "workshop.app.v1",
   "slug": "shortlist",
   "title": "Shortlist",
-  "description": "Today's arXiv, read for you by an AI agent. Describe your research (or pick a sample researcher) and the agent screens every new paper in your fields: titles first, then abstracts, with a score and a one-line reason each. Tell the assistant what's off and it finds the cause in your interest profile, edits a draft, and re-scores real papers under the draft before you accept the change. The Agent log shows every model request and tool call. Simplifications: arXiv only; the feed covers papers announced during your visit (the RSS feed, or the search API on weekends); one model, the one you select, does all screening and the assistant; nothing is kept after the visit ends.",
+  "description": "Today's arXiv, read for you by an AI agent. Pick a sample researcher, or describe your own research, and Shortlist screens every new paper in your fields: titles first, then abstracts, with a score and a one-line reason each. Tell the assistant what's off and it finds the cause in your interest profile, edits a draft, and re-scores real papers under it. Before testing, it says what each paper should do (drop out, rise in, or stay), and the app checks the final draft against that before you decide whether to apply it. Design: screening is a fixed workflow because its steps are known; the assistant is an agent loop because each test result can change its next step; it proposes and you approve. The Agent log shows every model request and tool call and why each run ended, and Stop ends a run before its next request. Simplifications: arXiv only; the feed covers papers announced during your visit (the RSS feed, or the search API on weekends); one model, the one you select, does all screening and the assistant; nothing is kept after the visit ends.",
   "runtime": {
     "languages": ["python312"],
     "profile": "standard",
@@ -11,7 +11,7 @@
     "port": 8080,
     "healthPath": "/healthz"
   },
-  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. The first papers appear in about 15 seconds; the rest fill in as they're scored. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and apply its tested proposal. Open the Agent log to watch each model request and tool call.",
+  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. The first papers appear in about 15 seconds; the rest fill in as they're scored. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and check the app's verdict on its proposal before you apply it. Open the Agent log to watch each model request and tool call.",
   "inference": {
     "mode": "selectable",
     "models": [
