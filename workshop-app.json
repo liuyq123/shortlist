@@ -32,13 +32,13 @@
       "z-ai/glm-5.3-flash",
       "anthropic/claude-haiku-5.5"
     ],
-    "defaultModel": "anthropic/claude-haiku-5.5",
-    "defaultProfile": "haiku-auto",
+    "defaultModel": "openai/gpt-6-luna",
+    "defaultProfile": "luna-auto",
     "estimatedUsdPerVisit": {
       "low": 0.02,
       "high": 0.25
     },
-    "estimateBasis": "Measured with Claude Haiku 5.5 on the class gateway: about $0.02 per feed and under $0.01 per assistant message. Portal limits apply."
+    "estimateBasis": "Measured on the class gateway: about $0.01 per feed and under $0.01 per assistant message with GPT-6 Luna; up to $0.04 with other models. Portal limits apply."
   },
   "network": {
     "classServices": [],

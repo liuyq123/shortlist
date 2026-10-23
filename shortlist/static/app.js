@@ -783,6 +783,7 @@ function botMessage(message, index) {
       ${message.tests ? testsTable(message.tests) : ""}
       ${message.reply ? `<div class="reply">${esc(message.reply)}</div>` : ""}
       ${message.stopped ? `<div class="msg-stopped">Stopped. Nothing in your interests changed.</div>` : ""}
+      ${message.reply && !message.proposal ? `<div class="msg-stopped">Your interests weren't changed.</div>` : ""}
       ${message.error ? `<div class="msg-error">${esc(message.error)}</div>` : ""}
       ${message.proposal ? proposalCard(message, index) : ""}
     </div>`;

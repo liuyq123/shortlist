@@ -171,7 +171,6 @@ def build_profile(
                 system=BUILD_SYSTEM_PROMPT,
                 user=_build_prompt(description, papers),
                 output=BuiltProfile,
-                max_tokens=8000,
             )
         except ReplyError as exc:
             raise ValueError(f"Could not build a profile: {exc} Try again.") from None

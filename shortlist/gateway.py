@@ -34,7 +34,7 @@ CONTRACT_VERSION = "workshop.app.v1"
 TIMEOUT_SECONDS = 90  # hosted requests have a 90-second deadline
 MAX_PROMPT_BLOCK_CHARS = 4000  # per message, in the logged prompt
 MANIFEST_PATH = Path(__file__).resolve().parent.parent / "workshop-app.json"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 12000  # room for models that reason before answering; only tokens written are charged
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 

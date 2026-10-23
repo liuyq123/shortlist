@@ -34,7 +34,7 @@ from shortlist.profile import profile_hash, render
 TITLE_BATCH_SIZE = 150
 ABSTRACT_BATCH_SIZE = 15
 MAX_ABSTRACT_CHARS = 1500
-MAX_OUTPUT_TOKENS = 4096
+MAX_OUTPUT_TOKENS = gateway.DEFAULT_MAX_TOKENS
 MAX_WORKERS = 3  # parallel batches at most, when the allowance can hold that many requests
 MIN_SCORE = 4  # papers below this are hidden from the feed
 FETCH_MAX_AGE_SECONDS = 3600
