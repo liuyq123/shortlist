@@ -1,35 +1,57 @@
 {
   "schemaVersion": "workshop.app.v1",
-  "slug": "shortlist",
+  "slug": "local-57e0c053-ac16-4155-a2fc-d9253a9fed55",
   "title": "Shortlist",
-  "description": "Today's arXiv, read for you by an AI agent. Pick a sample researcher, or describe your own research, and Shortlist screens every new paper in your fields: titles first, then abstracts, with a score and a one-line reason each. Tell the assistant what's off and it finds the cause in your interest profile, edits a draft, and re-scores real papers under it. Before testing, it says what each paper should do (drop out, rise in, or stay), and the app checks the final draft against that before you decide whether to apply it. Design: screening is a fixed workflow because its steps are known; the assistant is an agent loop because each test result can change its next step; it proposes and you approve. The Agent log shows every model request and tool call and why each run ended, and Stop ends a run before its next request. Simplifications: arXiv only; the feed covers papers announced during your visit (the RSS feed, or the search API on weekends); one model, the one you select, does all screening and the assistant; nothing is kept after the visit ends.",
+  "description": "An AI agent that reads every new arXiv paper in your fields and tests each change to your interests on real papers before you apply it. Simplified: arXiv only; nothing is kept after the visit.",
   "runtime": {
-    "languages": ["python312"],
+    "languages": [
+      "python312"
+    ],
     "profile": "standard",
-    "build": ["python3.12", "-m", "compileall", "-q", "app.py", "shortlist"],
-    "start": ["python3.12", "app.py"],
+    "build": [
+      "python3.12",
+      "-m",
+      "compileall",
+      "-q",
+      "app.py",
+      "shortlist"
+    ],
+    "start": [
+      "python3.12",
+      "app.py"
+    ],
     "port": 8080,
     "healthPath": "/healthz"
   },
-  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. The first papers appear in about 15 seconds; the rest fill in as they're scored. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and check the app's verdict on its proposal before you apply it. Open the Agent log to watch each model request and tool call.",
+  "instructions": "Pick a sample researcher, click Not for me on a paper, check the verdict on the assistant's proposal, then open the Agent log.",
   "inference": {
     "mode": "selectable",
     "models": [
-      "anthropic/claude-haiku-5.5",
       "deepseek/deepseek-v4.1-flash",
       "openai/gpt-6-luna",
-      "z-ai/glm-5.3-flash"
+      "z-ai/glm-5.3-flash",
+      "anthropic/claude-haiku-5.5"
     ],
     "defaultModel": "anthropic/claude-haiku-5.5",
     "defaultProfile": "haiku-auto",
-    "estimatedUsdPerVisit": {"low": 0.02, "high": 0.25},
-    "estimateBasis": "Measured with Claude Haiku 5.5 at list prices through a local stand-in for the gateway: screening ~440 papers cost $0.017 (11 requests), one assistant message $0.004 (5 requests), re-screening after a change $0.014. A visit with several changes stays under about $0.25. Other models are priced differently; portal limits apply."
+    "estimatedUsdPerVisit": {
+      "low": 0.02,
+      "high": 0.25
+    },
+    "estimateBasis": "Measured with Claude Haiku 5.5 on the class gateway: about $0.02 per feed and under $0.01 per assistant message. Portal limits apply."
   },
   "network": {
     "classServices": [],
-    "publicHttpsDomains": ["rss.arxiv.org", "export.arxiv.org", "arxiv.org"],
-    "publicWeb": false
+    "publicHttpsDomains": [
+      "rss.arxiv.org",
+      "export.arxiv.org",
+      "arxiv.org"
+    ],
+    "publicWeb": true
   },
-  "storage": {"visitorMiB": 0, "schema": "shortlist.v1"},
+  "storage": {
+    "visitorMiB": 0,
+    "schema": "shortlist.v1"
+  },
   "integrations": []
 }

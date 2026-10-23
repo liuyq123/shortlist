@@ -85,11 +85,11 @@ Assistant                 the same model with 12 tools: inspect feed/votes/paper
 
 ## Publish to the class app store
 
-1. In **My app**, claim an address and put the same value in `slug` in `workshop-app.json`.
-2. Build a fresh ZIP. If your address is `shortlist`:
+1. The app's address in My app is `local-57e0c053-ac16-4155-a2fc-d9253a9fed55`. It was fixed at the first publication so shared links keep working, and `slug` in `workshop-app.json` must stay the same.
+2. Build a fresh ZIP:
 
    ```sh
-   uv run --locked python package.py --slug shortlist --output ../shortlist.zip
+   uv run --locked python package.py --slug local-57e0c053-ac16-4155-a2fc-d9253a9fed55 --output ../shortlist.zip
    ```
 
    The packager checks the slug, includes only the files the app needs (manifest and lockfile at the root), and leaves out `.env`, `.local/` and caches.
