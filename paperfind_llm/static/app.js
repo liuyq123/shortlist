@@ -597,7 +597,7 @@ function paperCard(paper) {
       <div class="score ${scoreClass}" title="Claude's relevance score (0–10)">${score}${delta}</div>
       <div>
         <div class="paper-meta">
-          ${theme ? `<span class="theme-tag" style="--c:${colorFor(theme)}">${esc(theme.name)}</span>` : `<span class="theme-tag">${esc(paper.theme || "Other")}</span>`}
+          ${theme ? `<span class="theme-tag" style="--c:${colorFor(theme)}">${esc(theme.name)}</span>` : `<span class="theme-tag">${esc(paper.theme && paper.theme !== "none" ? paper.theme : "Other")}</span>`}
           <span>${esc(categories[0] || "")}</span><span>${fmtDate(paper.published)}</span>
           ${isNew ? `<span class="new-badge">New in your feed</span>` : ""}
         </div>

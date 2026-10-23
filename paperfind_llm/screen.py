@@ -12,13 +12,14 @@ stored per (paper, profile version), so nothing is screened twice.
 """
 
 import contextvars
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from threading import Lock
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from paperfind_llm import activity, arxiv, config, store
 from paperfind_llm.activity import section
@@ -48,22 +49,24 @@ Score each paper from 0 to 10 for how much this researcher would want to read it
 - 4-6: related, e.g. shares a method or system but is not their focus
 - 0-3: unrelated, or falls under NOT INTERESTED IN
 
-For each paper return its id, the score, the name of the best-matching interest exactly as written in the profile (or "none"), and a reason of at most 25 words saying what in the paper connects to that interest, addressed to the researcher ("Your ...")."""
+For each paper return its id, the score, the interest it best matches (one of the interest names in the profile, or "none"), and a reason of at most 25 words saying what in the paper connects to that interest, addressed to the researcher ("Your ...")."""
 
 
 class TitleScreen(BaseModel):
     selected: list[int]
 
 
-class PaperScore(BaseModel):
-    id: int
-    score: int
-    theme: str
-    reason: str
+def _scores_format(interests: list[str]) -> type[BaseModel]:
+    """The scoring reply for one profile: each paper's interest must be one of its names, or "none".
 
-
-class AbstractScores(BaseModel):
-    papers: list[PaperScore]
+    With a free-text field named "theme", the model often wrote the paper's topic there (29% of
+    papers), and in about 1 batch in 10 it left the reason string open, wrote the next field
+    inside it, and ended the list after one paper. With this schema, or the paper count stated
+    in the request, or both: 0 short replies in 126 test batches, against 11 in 112 before.
+    """
+    names = tuple(dict.fromkeys([*interests, "none"]))
+    item = create_model("PaperScore", id=(int, ...), score=(int, ...), interest=(Literal[names], ...), reason=(str, ...))
+    return create_model("AbstractScores", papers=(list[item], ...))
 
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
@@ -74,8 +77,15 @@ class ScreeningError(Exception):
     """A batch the model declined, or whose reply couldn't be read."""
 
 
+# Where a reason runs on into JSON, markup, or a link: "…tasks.</reason>", "…','theme':'none", "…},{", "…](Your"
+_RUN_ON = re.compile(r"</|\]\(|','|\},\s*\{")
+
+
 def _clean_reason(text: str) -> str:
-    """Trim stray trailing punctuation the model sometimes leaves, e.g. 'heads.),'."""
+    """Cut a reason that ran on into other syntax, and trim stray trailing punctuation, e.g. 'heads.),'."""
+    run_on = _RUN_ON.search(text)
+    if run_on:
+        text = text[: run_on.start()]
     text = text.strip().rstrip(",; ")
     while text.endswith(")") and text.count(")") > text.count("("):
         text = text[:-1].rstrip(",; ")
@@ -93,6 +103,7 @@ class Screener:
         self.profile_text = render(profile)
         self.model = config.SCREEN_MODEL
         self.draft = draft  # scoring an unsaved draft, for the assistant's test_draft
+        self.scores_format = _scores_format([theme["name"] for theme in profile.get("themes", [])])
         self.skipped = 0  # papers the model left out of its scores twice, across batches
         self._lock = Lock()
 
@@ -139,13 +150,14 @@ class Screener:
             missing = [paper for paper in batch if paper["id"] not in scores]
             if not missing:
                 break
-            blocks = []
+            n = len(missing)
+            blocks = [f"Score all {n} papers below: return {n} entries, with ids 1 to {n}."]
             for i, paper in enumerate(missing, 1):
                 abstract = (paper.get("abstract") or "")[:MAX_ABSTRACT_CHARS]
                 blocks.append(f"Paper {i}\nTitle: {paper['title']}\nAbstract: {abstract or '(none)'}")
-            purpose = f"{task}, {where}" if attempt == 0 else f"{task}, {where}: retry for {len(missing)} skipped"
+            purpose = f"{task}, {where}" if attempt == 0 else f"{task}, {where}: retry for {n} skipped"
             try:
-                response, result = self._call(purpose, ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), AbstractScores)
+                response, result = self._call(purpose, ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), self.scores_format)
             except Exception:
                 if attempt == 0:
                     raise
@@ -157,7 +169,7 @@ class Screener:
                     scores[paper["id"]] = {
                         "paper_id": paper["id"],
                         "score": float(max(0, min(10, item.score))),
-                        "theme": item.theme.strip()[:120],
+                        "theme": item.interest,
                         "reason": _clean_reason(item.reason),
                     }
                     new.append((scores[paper["id"]], paper["title"]))

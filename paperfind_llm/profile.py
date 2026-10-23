@@ -25,7 +25,7 @@ from paperfind_llm.activity import section
 from paperfind_llm.claude import call, fallback_params
 
 MAX_LIBRARY_PAPERS = 800
-PROMPT_VERSION = "1"  # part of the screening cache key; bump when screening prompts change
+PROMPT_VERSION = "2"  # part of the screening cache key; bump when screening prompts change
 
 BUILD_SYSTEM_PROMPT = """You write research-interest profiles. A smaller model will use the profile to screen hundreds of new arXiv papers a day for this researcher, deciding from titles and abstracts which ones they would want to read.
 
