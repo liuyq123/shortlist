@@ -1,5 +1,5 @@
 [project]
-name = "paperfind"
+name = "shortlist"
 version = "0.2.0"
 description = "Today's arXiv, screened by an AI agent and tuned by talking to an assistant"
 readme = "README.md"

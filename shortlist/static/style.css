@@ -174,9 +174,9 @@ textarea { resize: vertical; }
 
 .drop {
   margin-top: 10px; border: 1.5px dashed var(--border); border-radius: 9px;
-  padding: 10px 12px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px;
+  padding: 10px 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--muted); font-size: 14px;
 }
-.drop input { font-size: 13px; }
+.drop input { font-size: 13px; max-width: 100%; }
 
 .divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 13px; margin: 26px 0 14px; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }

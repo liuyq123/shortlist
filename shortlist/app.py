@@ -21,14 +21,14 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, assistant, config, gateway, screen, store
-from paperfind_llm import profile as profiles
-from paperfind_llm.gateway import describe_error, session_usage
+from shortlist import activity, arxiv, assistant, config, gateway, screen, store
+from shortlist import profile as profiles
+from shortlist.gateway import describe_error, session_usage
 
 STATIC_DIR = Path(__file__).parent / "static"
-logger = logging.getLogger("paperfind_llm")
+logger = logging.getLogger("shortlist")
 
-app = FastAPI(title="paperfind")
+app = FastAPI(title="Shortlist")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 Emit = Callable[[dict[str, Any]], None]

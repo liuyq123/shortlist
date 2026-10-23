@@ -1,6 +1,6 @@
-# paperfind
+# Shortlist
 
-**Today's arXiv, read for you by an AI agent.** Tell paperfind what you research, and it screens every new arXiv paper in your fields, shows you the ones worth reading with a one-line reason each, and lets you fix what it gets wrong by talking to an assistant. The assistant finds the cause, edits your interests, and **tests the edit on real papers before you accept it**.
+**Today's arXiv, read for you by an AI agent.** Tell Shortlist what you research, and it screens every new arXiv paper in your fields, shows you the ones worth reading with a one-line reason each, and lets you fix what it gets wrong by talking to an assistant. The assistant finds the cause, edits your interests, and **tests the edit on real papers before you accept it**.
 
 There are no embeddings or vector databases. Every judgment is made by the model you select in the class app store, through the class gateway.
 
@@ -69,10 +69,10 @@ Assistant                 the same model with 12 tools: inspect feed/votes/paper
 ## Publish to the class app store
 
 1. In **My app**, claim an address and put the same value in `slug` in `workshop-app.json`.
-2. Build a fresh ZIP. If your address is `paperfind`:
+2. Build a fresh ZIP. If your address is `shortlist`:
 
    ```sh
-   uv run --locked python package.py --slug paperfind --output ../paperfind.zip
+   uv run --locked python package.py --slug shortlist --output ../shortlist.zip
    ```
 
    The packager checks the slug, includes only the files the app needs (manifest and lockfile at the root), and leaves out `.env`, `.local/` and caches.
@@ -90,7 +90,7 @@ Set these in `.env` for local runs:
 | `WORKSHOP_DEVELOPMENT_TOKEN` | (none) | Your local development token. Keep it out of source files and ZIPs |
 | `PORT` | `8080` | |
 | `WINDOW_DAYS` | `3` | How many days of papers the feed covers |
-| `PAPERFIND_LLM_DATA_DIR` | `.local` | Where the SQLite database and profile live |
+| `SHORTLIST_DATA_DIR` | `.local` | Where the SQLite database and profile live |
 
 ## Project layout
 
@@ -98,7 +98,7 @@ Set these in `.env` for local runs:
 app.py              entry point (python app.py), used by the platform and locally
 workshop-app.json   the class app manifest: runtime, models, network, storage
 package.py          builds the upload ZIP
-paperfind_llm/
+shortlist/
   gateway.py        the class gateway: bootstrap, the one wrapper for every model request, costs
   app.py            FastAPI server; long operations stream progress as NDJSON; /healthz
   activity.py       the agent log: runs, model requests, tool calls, problems

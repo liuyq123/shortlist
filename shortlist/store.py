@@ -1,5 +1,5 @@
 """
-Local storage: one SQLite database plus profile.json in ~/.paperfind-llm.
+Storage: one SQLite database plus profile.json in the data folder (./.local, or the visit's temporary folder when hosted).
 
 Tables:
     papers      arXiv papers fetched for the feed
@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
-from paperfind_llm import config
+from shortlist import config
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS papers (

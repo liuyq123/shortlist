@@ -20,9 +20,9 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, store
-from paperfind_llm.activity import section
-from paperfind_llm.gateway import ReplyError, call_json
+from shortlist import activity, arxiv, store
+from shortlist.activity import section
+from shortlist.gateway import ReplyError, call_json
 
 MAX_LIBRARY_PAPERS = 800
 PROMPT_VERSION = "3"  # part of the screening cache key; bump when screening prompts change

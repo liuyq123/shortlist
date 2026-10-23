@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
-from paperfind_llm import activity, config
+from shortlist import activity, config
 
 CONTRACT_VERSION = "workshop.app.v1"
 TIMEOUT_SECONDS = 90  # hosted requests have a 90-second deadline

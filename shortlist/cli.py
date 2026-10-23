@@ -7,12 +7,12 @@ import webbrowser
 
 import uvicorn
 
-from paperfind_llm import config
+from shortlist import config
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="paperfind",
+        prog="shortlist",
         description="Daily arXiv papers screened by an AI agent, tuned by talking to an assistant.",
     )
     parser.add_argument("--host", default=config.HOST)
@@ -24,8 +24,8 @@ def main() -> None:
     url = f"http://{'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host}:{args.port}"
     if not (args.no_browser or config.HOSTED):
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    print(f"paperfind is running at {url}  (Ctrl+C to stop)", flush=True)
-    uvicorn.run("paperfind_llm.app:app", host=args.host, port=args.port, log_level="warning")
+    print(f"Shortlist is running at {url}  (Ctrl+C to stop)", flush=True)
+    uvicorn.run("shortlist.app:app", host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

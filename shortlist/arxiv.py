@@ -23,7 +23,7 @@ from email.utils import parsedate_to_datetime
 from http.client import HTTPSConnection
 from typing import Any, Callable, Optional
 
-from paperfind_llm import config
+from shortlist import config
 
 RSS_URL = "https://rss.arxiv.org/rss/"
 API_URL = "https://export.arxiv.org/api/query"
@@ -31,7 +31,7 @@ PAGE_SIZE = 500
 MAX_PAGES = 6
 REQUEST_GAP_SECONDS = 3.0
 TIMEOUT_SECONDS = 60
-USER_AGENT = "paperfind-llm/0.1 (paper recommendation class project)"
+USER_AGENT = "shortlist/0.2 (paper recommendation class project)"
 
 _NS = {
     "a": "http://www.w3.org/2005/Atom",

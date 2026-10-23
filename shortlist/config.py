@@ -33,10 +33,10 @@ READINESS = os.getenv("WORKSHOP_READINESS") == "1"
 
 # Hosted visits may only write to the temporary directory
 DATA_DIR = Path(
-    os.getenv("PAPERFIND_LLM_DATA_DIR")
-    or (Path(tempfile.gettempdir()) / "paperfind" if HOSTED else Path.cwd() / ".local")
+    os.getenv("SHORTLIST_DATA_DIR")
+    or (Path(tempfile.gettempdir()) / "shortlist" if HOSTED else Path.cwd() / ".local")
 )
-DB_PATH = DATA_DIR / "paperfind.db"
+DB_PATH = DATA_DIR / "shortlist.db"
 PROFILE_PATH = DATA_DIR / "profile.json"
 
 HOST = os.getenv("HOST") or ("0.0.0.0" if HOSTED else "127.0.0.1")

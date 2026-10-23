@@ -18,17 +18,17 @@ from typing import Any, Callable, Optional
 
 from pydantic import Field, ValidationError, create_model
 
-from paperfind_llm import activity, arxiv, store
-from paperfind_llm.activity import section
-from paperfind_llm.gateway import call
-from paperfind_llm.screen import get_feed, rescore, window_start
+from shortlist import activity, arxiv, store
+from shortlist.activity import section
+from shortlist.gateway import call
+from shortlist.screen import get_feed, rescore, window_start
 
 MAX_TURNS = 10  # model requests per message; the last one must answer without tools
 MAX_LOGGED_RESULT_CHARS = 300
 MAX_TEST_PAPERS = 15
 HISTORY_MESSAGES = 6
 
-SYSTEM_PROMPT = """You are the assistant inside paperfind, a daily arXiv feed. A screening step reads each new paper against the researcher's interest profile: first by title, then by abstract, giving a 0-10 score, the best-matching theme, and a reason. Papers scoring 4 or more are shown. The profile (themes, a "not interested" list, and arXiv categories) is the only thing that controls the feed, so you help by editing it.
+SYSTEM_PROMPT = """You are the assistant inside Shortlist, a daily arXiv feed. A screening step reads each new paper against the researcher's interest profile: first by title, then by abstract, giving a 0-10 score, the best-matching theme, and a reason. Papers scoring 4 or more are shown. The profile (themes, a "not interested" list, and arXiv categories) is the only thing that controls the feed, so you help by editing it.
 
 When the user gives feedback:
 1. Look at the evidence: the papers they mean (get_feed_papers, get_votes, get_paper, search_papers) and the screener's score, theme, and reason for each.

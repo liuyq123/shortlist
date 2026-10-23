@@ -292,7 +292,7 @@ function renderConnect() {
     <div class="center-wrap">
       <div class="hero">
         <h1>Connect to the class gateway</h1>
-        <p>paperfind reads today's arXiv with the model you choose in the class app store. Requests are paid from the allowance you select there.</p>
+        <p>Shortlist reads today's arXiv with the model you choose in the class app store. Requests are paid from the allowance you select there.</p>
       </div>
       <div class="card-box">${problem}${steps}
         <div class="row" style="margin-top:14px"><div class="spacer"></div>
@@ -312,7 +312,7 @@ function renderOnboarding() {
     <div class="center-wrap">
       <div class="hero">
         <h1>What do you research?</h1>
-        <p>Tell paperfind in a sentence or two and add a few papers you like. The model turns that into an interest profile, then reads every new arXiv paper for you.</p>
+        <p>Tell Shortlist in a sentence or two and add a few papers you like. The model turns that into an interest profile, then reads every new arXiv paper for you.</p>
       </div>
       <div class="card-box">
         <label class="field-label" for="desc">Your research</label>
@@ -1509,6 +1509,6 @@ document.addEventListener("toggle", (event) => {
       refreshFeed();
     }
   } catch (err) {
-    $("#app").innerHTML = `<div class="loading">Could not reach the paperfind server: ${esc(err.message)}</div>`;
+    $("#app").innerHTML = `<div class="loading">Could not reach the Shortlist server: ${esc(err.message)}</div>`;
   }
 })();

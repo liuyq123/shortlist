@@ -26,10 +26,10 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, config, gateway, store
-from paperfind_llm.activity import section
-from paperfind_llm.gateway import ReplyError, call_json, describe_error
-from paperfind_llm.profile import profile_hash, render
+from shortlist import activity, arxiv, config, gateway, store
+from shortlist.activity import section
+from shortlist.gateway import ReplyError, call_json, describe_error
+from shortlist.profile import profile_hash, render
 
 TITLE_BATCH_SIZE = 150
 ABSTRACT_BATCH_SIZE = 15

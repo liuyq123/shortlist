@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Create the upload ZIP for the class app store: uv run --locked python package.py --slug YOUR_ADDRESS --output ../paperfind.zip
+"""Create the upload ZIP for the class app store: uv run --locked python package.py --slug YOUR_ADDRESS --output ../shortlist.zip
 
 Adapted from the workshop's minimal app packager. The manifest sits at the ZIP root,
 and local settings (.env), local data (.local/) and caches never go in.
@@ -32,7 +32,7 @@ if manifest["slug"] != args.slug:
 names = ["app.py", "package.py", "pyproject.toml", "uv.lock", "workshop-app.json", "README.md"]
 names += sorted(
     path.relative_to(root).as_posix()
-    for path in (root / "paperfind_llm").rglob("*")
+    for path in (root / "shortlist").rglob("*")
     if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
 )
 for name in names:

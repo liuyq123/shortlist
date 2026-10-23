@@ -187,7 +187,7 @@ def run(
     try:
         yield current
     except Exception as exc:
-        from paperfind_llm.gateway import describe_error
+        from shortlist.gateway import describe_error
 
         _end(current, "error", describe_error(exc))
         raise
