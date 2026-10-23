@@ -47,6 +47,8 @@
 
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
 html, body { margin: 0; height: 100%; }
 
 body {
@@ -96,6 +98,11 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: 
   background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums;
 }
 .pill:hover { color: var(--text); }
+.model-pill { cursor: default; color: var(--text); font-weight: 600; }
+.model-pill:hover { color: var(--text); }
+.connect-steps { margin: 0; padding-left: 20px; line-height: 1.7; }
+.connect-steps code { font: 13px var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.card-box .banner { margin-bottom: 12px; }
 
 .views { display: flex; gap: 2px; background: var(--surface-2); padding: 3px; border-radius: 10px; }
 .views button {
@@ -582,6 +589,7 @@ textarea { resize: vertical; }
   .topbar { padding: 0 12px; gap: 8px; }
   .views button { padding: 5px 9px; }
   .pill-suffix { display: none; }
+  .model-pill { display: none; }
   .log { padding: 12px; }
   .log-head p { display: none; }
   .log-totals { display: grid; grid-template-columns: repeat(4, auto); gap: 12px; width: 100%; }

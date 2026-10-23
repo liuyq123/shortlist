@@ -1,1 +1,1 @@
-"""paperfind-llm: daily arXiv papers screened by Claude, tuned by talking to an assistant."""
+"""paperfind: daily arXiv papers screened by an AI agent, tuned by talking to an assistant."""

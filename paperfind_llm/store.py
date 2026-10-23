@@ -3,7 +3,7 @@ Local storage: one SQLite database plus profile.json in ~/.paperfind-llm.
 
 Tables:
     papers      arXiv papers fetched for the feed
-    screening   Claude's verdict per (paper, profile version): passed the title
+    screening   the model's verdict per (paper, profile version): passed the title
                 screen? abstract score, matching theme, reason
     votes       the user's thumbs up/down
     feedback    assistant conversations and whether their changes were applied

@@ -1,26 +1,14 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "paperfind-llm"
-version = "0.1.0"
-description = "Daily paper recommendations screened by Claude, tuned by talking to an agent"
+name = "paperfind"
+version = "0.2.0"
+description = "Today's arXiv, screened by an AI agent and tuned by talking to an assistant"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "anthropic>=2.1.0",
     "fastapi>=0.110.0",
-    "uvicorn>=0.23.0",
-    "python-dotenv>=1.0.0",
     "python-multipart>=0.0.9",
+    "uvicorn>=0.23.0",
 ]
 
-[project.scripts]
-paperfind-llm = "paperfind_llm.cli:main"
-
-[tool.setuptools.packages.find]
-include = ["paperfind_llm*"]
-
-[tool.setuptools.package-data]
-paperfind_llm = ["static/*", "personas.json"]
+[tool.uv]
+package = false

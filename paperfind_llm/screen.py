@@ -4,11 +4,11 @@ Two-pass LLM screening of recent arXiv papers.
 1. Title screen: numbered titles in batches of 150. The model keeps anything
    plausibly relevant to the profile, generously, since pass 2 reads abstracts.
 2. Abstract scoring: survivors in batches of 15 get a 0-10 score, the matching
-   theme, and a one-sentence reason.
+   interest, and a one-sentence reason.
 
-Both passes use SCREEN_MODEL (default claude-haiku-5-5) and the profile is
-cached as the system prompt, so a day of papers costs about a cent. Results are
-stored per (paper, profile version), so nothing is screened twice.
+Both passes use the model the visitor selected in the class app store, through
+the gateway. Replies are JSON checked by this app. Results are stored per
+(paper, profile version), so nothing is screened twice.
 """
 
 import contextvars
@@ -17,19 +17,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from threading import Lock
-from typing import Any, Callable, Literal, TypeVar
+from typing import Any, Callable, TypeVar
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel
 
 from paperfind_llm import activity, arxiv, config, store
 from paperfind_llm.activity import section
-from paperfind_llm.claude import call, describe_error, fallback_params
+from paperfind_llm.gateway import ReplyError, call_json, describe_error
 from paperfind_llm.profile import profile_hash, render
 
 TITLE_BATCH_SIZE = 150
 ABSTRACT_BATCH_SIZE = 15
 MAX_ABSTRACT_CHARS = 1500
-MAX_WORKERS = 4
+MAX_OUTPUT_TOKENS = 4096
+MAX_WORKERS = 3  # parallel requests; the gateway may refuse more
 MIN_SCORE = 4  # papers below this are hidden from the feed
 FETCH_MAX_AGE_SECONDS = 3600
 
@@ -37,7 +38,10 @@ TITLE_SYSTEM_PROMPT = """You screen new research papers for one researcher. Thei
 
 {profile}
 
-You will get a numbered list of new paper titles. Select every paper that could plausibly match one of their interests. Be generous: a second pass reads the abstracts, so include a paper when in doubt. Leave out papers that clearly match none of the interests or that fall under NOT INTERESTED IN."""
+You will get a numbered list of new paper titles. Select every paper that could plausibly match one of their interests. Be generous: a second pass reads the abstracts, so include a paper when in doubt. Leave out papers that clearly match none of the interests or that fall under NOT INTERESTED IN.
+
+Reply with only a JSON object listing the numbers of the titles you select, for example:
+{"selected": [3, 8, 15]}"""
 
 ABSTRACT_SYSTEM_PROMPT = """You score new research papers for one researcher. Their interest profile:
 
@@ -49,24 +53,27 @@ Score each paper from 0 to 10 for how much this researcher would want to read it
 - 4-6: related, e.g. shares a method or system but is not their focus
 - 0-3: unrelated, or falls under NOT INTERESTED IN
 
-For each paper return its id, the score, the interest it best matches (one of the interest names in the profile, or "none"), and a reason of at most 25 words saying what in the paper connects to that interest, addressed to the researcher ("Your ...")."""
+For each paper return its id, the score, the interest it best matches, and a reason of at most 25 words saying what in the paper connects to that interest, addressed to the researcher ("Your ...").
+
+For "interest", use one of these names exactly, or "none": {interests}
+
+Reply with only a JSON object with one entry per paper, for example:
+{"papers": [{"id": 1, "score": 7, "interest": "<an interest name or none>", "reason": "Your ..."}]}"""
 
 
 class TitleScreen(BaseModel):
     selected: list[int]
 
 
-def _scores_format(interests: list[str]) -> type[BaseModel]:
-    """The scoring reply for one profile: each paper's interest must be one of its names, or "none".
+class PaperScore(BaseModel):
+    id: int
+    score: float
+    interest: str = "none"
+    reason: str = ""
 
-    With a free-text field named "theme", the model often wrote the paper's topic there (29% of
-    papers), and in about 1 batch in 10 it left the reason string open, wrote the next field
-    inside it, and ended the list after one paper. With this schema, or the paper count stated
-    in the request, or both: 0 short replies in 126 test batches, against 11 in 112 before.
-    """
-    names = tuple(dict.fromkeys([*interests, "none"]))
-    item = create_model("PaperScore", id=(int, ...), score=(int, ...), interest=(Literal[names], ...), reason=(str, ...))
-    return create_model("AbstractScores", papers=(list[item], ...))
+
+class AbstractScores(BaseModel):
+    papers: list[PaperScore]
 
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
@@ -74,7 +81,7 @@ Emit = Callable[[dict[str, Any]], None]
 
 
 class ScreeningError(Exception):
-    """A batch the model declined, or whose reply couldn't be read."""
+    """A batch whose reply couldn't be used: unreadable, declined, or cut off."""
 
 
 # Where a reason runs on into JSON, markup, or a link: "…tasks.</reason>", "…','theme':'none", "…},{", "…](Your"
@@ -101,38 +108,33 @@ class Screener:
 
     def __init__(self, profile: dict[str, Any], draft: bool = False):
         self.profile_text = render(profile)
-        self.model = config.SCREEN_MODEL
+        self.interests = [theme["name"] for theme in profile.get("themes", [])]
         self.draft = draft  # scoring an unsaved draft, for the assistant's test_draft
-        self.scores_format = _scores_format([theme["name"] for theme in profile.get("themes", [])])
         self.skipped = 0  # papers the model left out of its scores twice, across batches
         self._lock = Lock()
 
-    def _call(self, purpose: str, system_template: str, user: str, output_format: type[OutputT]) -> tuple[Any, OutputT]:
-        response = call(
-            purpose,
-            model=self.model,
-            retries=4,
-            max_tokens=8000,
-            # The profile is the same for every batch, so cache it
-            system=[{
-                "type": "text",
-                "text": system_template.format(profile=self.profile_text),
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{"role": "user", "content": user}],
-            output_format=output_format,
-            output_config={"effort": "low"},
-            **fallback_params(self.model),
+    def _call(self, purpose: str, template: str, user: str, output: type[OutputT]) -> tuple[dict[str, Any], OutputT]:
+        system = template.replace("{profile}", self.profile_text).replace(
+            "{interests}", ", ".join(f'"{name}"' for name in self.interests)
         )
-        if response.stop_reason == "refusal":
-            raise ScreeningError("The model declined this batch.")
-        if response.parsed_output is None:
-            raise ScreeningError(f"The model's reply couldn't be read (stop reason: {response.stop_reason}).")
-        return response, response.parsed_output
+        try:
+            return call_json(purpose, system=system, user=user, output=output, max_tokens=MAX_OUTPUT_TOKENS)
+        except ReplyError as exc:
+            raise ScreeningError(str(exc)) from None
+
+    def _interest(self, name: str) -> str:
+        """The profile's interest name the model meant, or "none" for anything else."""
+        wanted = name.strip().lower()
+        return next((interest for interest in self.interests if interest.lower() == wanted), "none")
 
     def screen_titles(self, batch: list[dict[str, Any]], where: str) -> list[tuple[str, bool]]:
         lines = [f"{i}. {paper['title']}" for i, paper in enumerate(batch, 1)]
-        response, result = self._call(f"Title screen, {where}", TITLE_SYSTEM_PROMPT, "Titles:\n" + "\n".join(lines), TitleScreen)
+        user = "Titles:\n" + "\n".join(lines)
+        # An unreadable reply gets one fresh request; gateway errors are never resent
+        try:
+            response, result = self._call(f"Title screen, {where}", TITLE_SYSTEM_PROMPT, user, TitleScreen)
+        except ScreeningError:
+            response, result = self._call(f"Title screen, {where}: asking again after an unreadable reply", TITLE_SYSTEM_PROMPT, user, TitleScreen)
         selected = {i for i in result.selected if 1 <= i <= len(batch)}
         kept = [paper["title"] for i, paper in enumerate(batch, 1) if i in selected]
         dropped = [paper["title"] for i, paper in enumerate(batch, 1) if i not in selected]
@@ -145,7 +147,7 @@ class Screener:
     def score_abstracts(self, batch: list[dict[str, Any]], where: str) -> list[dict[str, Any]]:
         task = "Scoring under the draft" if self.draft else "Abstract scoring"
         scores: dict[str, dict[str, Any]] = {}
-        # The model occasionally skips papers in a batch; ask once more for the missing ones
+        # If the reply is unreadable or leaves papers out, ask once more for the missing ones
         for attempt in range(2):
             missing = [paper for paper in batch if paper["id"] not in scores]
             if not missing:
@@ -155,21 +157,27 @@ class Screener:
             for i, paper in enumerate(missing, 1):
                 abstract = (paper.get("abstract") or "")[:MAX_ABSTRACT_CHARS]
                 blocks.append(f"Paper {i}\nTitle: {paper['title']}\nAbstract: {abstract or '(none)'}")
-            purpose = f"{task}, {where}" if attempt == 0 else f"{task}, {where}: retry for {n} skipped"
+            purpose = f"{task}, {where}" if attempt == 0 else f"{task}, {where}: asking again for {n} missing"
             try:
-                response, result = self._call(purpose, ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), self.scores_format)
-            except Exception:
+                response, result = self._call(purpose, ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), AbstractScores)
+            except ScreeningError:
                 if attempt == 0:
+                    continue
+                if not scores:
                     raise
-                break  # keep the first attempt's scores; the failed retry is in the log
+                break  # keep the first attempt's scores; the failed request is in the log
+            except Exception:
+                if scores:
+                    break  # keep the first attempt's scores; gateway errors are not resent
+                raise
             new = []
             for item in result.papers:
                 if 1 <= item.id <= len(missing) and missing[item.id - 1]["id"] not in scores:
                     paper = missing[item.id - 1]
                     scores[paper["id"]] = {
                         "paper_id": paper["id"],
-                        "score": float(max(0, min(10, item.score))),
-                        "theme": item.interest,
+                        "score": float(max(0, min(10, round(item.score)))),
+                        "theme": self._interest(item.interest),
                         "reason": _clean_reason(item.reason),
                     }
                     new.append((scores[paper["id"]], paper["title"]))

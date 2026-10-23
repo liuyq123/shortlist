@@ -8,7 +8,7 @@ The interest profile: what the screener reads to decide which papers you want.
       "categories": ["cs.LG", ...],      # arXiv categories the feed pulls from
     }
 
-Claude builds it from a description and/or papers you like (pasted titles, arXiv
+The model builds it from a description and/or papers you like (pasted titles, arXiv
 links, or a BibTeX/RIS export), and the assistant edits it from your feedback.
 """
 
@@ -20,14 +20,14 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm import activity, arxiv, store
 from paperfind_llm.activity import section
-from paperfind_llm.claude import call, fallback_params
+from paperfind_llm.gateway import ReplyError, call_json
 
 MAX_LIBRARY_PAPERS = 800
-PROMPT_VERSION = "2"  # part of the screening cache key; bump when screening prompts change
+PROMPT_VERSION = "3"  # part of the screening cache key; bump when screening prompts change
 
-BUILD_SYSTEM_PROMPT = """You write research-interest profiles. A smaller model will use the profile to screen hundreds of new arXiv papers a day for this researcher, deciding from titles and abstracts which ones they would want to read.
+BUILD_SYSTEM_PROMPT = """You write research-interest profiles. A screening model will use the profile to screen hundreds of new arXiv papers a day for this researcher, deciding from titles and abstracts which ones they would want to read.
 
 Write 3 to 8 themes that cover the researcher's actual interests. For each theme:
 - name: 2 to 6 words
@@ -38,19 +38,22 @@ Group papers by what the researcher studies, not by surface keywords. A topic th
 
 List in not_interested the adjacent areas a screener could confuse with these themes but that the researcher likely doesn't want (for example, applications of a method they develop, in fields they don't work in). Keep each item short.
 
-Choose 2 to 6 arxiv_categories from the list provided that will contain most of the papers they want."""
+Choose 2 to 6 arxiv_categories from the list provided that will contain most of the papers they want.
+
+Reply with only a JSON object in this format:
+{"themes": [{"name": "...", "description": "...", "example_titles": ["..."]}], "not_interested": ["..."], "arxiv_categories": ["cs.LG"]}"""
 
 
 class Theme(BaseModel):
     name: str
     description: str
-    example_titles: list[str]
+    example_titles: list[str] = []
 
 
 class BuiltProfile(BaseModel):
     themes: list[Theme]
-    not_interested: list[str]
-    arxiv_categories: list[str]
+    not_interested: list[str] = []
+    arxiv_categories: list[str] = []
 
 
 # =============================================================================
@@ -158,24 +161,20 @@ def build_profile(
 
         if papers:
             emit({"type": "step", "text": f"Reading {min(len(papers), MAX_LIBRARY_PAPERS)} papers"})
-        emit({"type": "step", "text": "Claude is writing your interest profile"})
+        emit({"type": "step", "text": "Writing your interest profile"})
 
-        model = config.AGENT_MODEL
-        response = call(
-            "Build profile",
-            model=model,
-            max_tokens=16000,
-            system=BUILD_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _build_prompt(description, papers)}],
-            output_format=BuiltProfile,
-            output_config={"effort": "medium"},
-            **fallback_params(model),
-        )
-        if response.stop_reason == "refusal":
-            raise ValueError("Claude declined to build this profile. Try rewording your description.")
-        built = response.parsed_output
-        if built is None or not built.themes:
-            raise ValueError(f"Could not build a profile (stop reason: {response.stop_reason}). Try again.")
+        try:
+            response, built = call_json(
+                "Build profile",
+                system=BUILD_SYSTEM_PROMPT,
+                user=_build_prompt(description, papers),
+                output=BuiltProfile,
+                max_tokens=8000,
+            )
+        except ReplyError as exc:
+            raise ValueError(f"Could not build a profile: {exc} Try again.") from None
+        if not built.themes:
+            raise ValueError("The model returned a profile with no themes. Try again, or describe your research in more detail.")
 
         categories = [c for c in built.arxiv_categories if c in arxiv.CATEGORIES] or ["cs.LG"]
         activity.annotate(response, summary=f"{len(built.themes)} themes, {len(built.not_interested)} exclusions", detail=[
@@ -229,6 +228,6 @@ def render(profile: dict[str, Any]) -> str:
 
 
 def profile_hash(profile: dict[str, Any]) -> str:
-    """Screening cache key: changes when the themes, exclusions, model, or prompts change."""
-    text = f"{PROMPT_VERSION}\n{config.SCREEN_MODEL}\n{render(profile)}"
+    """Screening cache key: changes when the themes, exclusions, or prompts change."""
+    text = f"{PROMPT_VERSION}\n{render(profile)}"
     return hashlib.sha256(text.encode()).hexdigest()[:16]

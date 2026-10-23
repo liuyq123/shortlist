@@ -12,13 +12,14 @@
     <div class="brand">
       <span class="logo" aria-hidden="true"></span>
       <span class="brand-name">paperfind</span>
-      <span class="tagline">today's arXiv, read for you by Claude</span>
+      <span class="tagline">today's arXiv, read for you by an AI agent</span>
     </div>
     <nav class="views" id="views" hidden>
       <button data-action="view" data-view="feed" class="active">Feed</button>
       <button data-action="view" data-view="log">Agent log<span class="live-dot" id="live-dot" hidden></span></button>
     </nav>
     <div class="topbar-right">
+      <span id="model" class="pill model-pill" hidden></span>
       <button id="cost" class="pill" data-action="view" data-view="log" title="Model API spend since the app started. Click for the agent log.">$0.000</button>
       <button id="reset-btn" class="link-btn" hidden>Start over</button>
     </div>

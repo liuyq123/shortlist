@@ -8,35 +8,37 @@ apply the proposal.
 """
 
 import copy
+import inspect
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Optional
 
-from anthropic import beta_tool
+from pydantic import Field, ValidationError, create_model
 
-from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm import activity, arxiv, store
 from paperfind_llm.activity import section
-from paperfind_llm.claude import call, fallback_params
+from paperfind_llm.gateway import call
 from paperfind_llm.screen import get_feed, rescore, window_start
 
-MAX_TURNS = 16  # model requests per message
+MAX_TURNS = 10  # model requests per message; the last one must answer without tools
 MAX_LOGGED_RESULT_CHARS = 300
 MAX_TEST_PAPERS = 15
 HISTORY_MESSAGES = 6
 
-SYSTEM_PROMPT = """You are the assistant inside paperfind, a daily arXiv feed. A small model screens each new paper against the researcher's interest profile: first by title, then by abstract, giving a 0-10 score, the best-matching theme, and a reason. Papers scoring 4 or more are shown. The profile (themes, a "not interested" list, and arXiv categories) is the only thing that controls the feed, so you help by editing it.
+SYSTEM_PROMPT = """You are the assistant inside paperfind, a daily arXiv feed. A screening step reads each new paper against the researcher's interest profile: first by title, then by abstract, giving a 0-10 score, the best-matching theme, and a reason. Papers scoring 4 or more are shown. The profile (themes, a "not interested" list, and arXiv categories) is the only thing that controls the feed, so you help by editing it.
 
 When the user gives feedback:
-1. Look at the evidence: the papers they mean (get_feed, get_votes, get_paper, search_papers) and the screener's score, theme, and reason for each.
+1. Look at the evidence: the papers they mean (get_feed_papers, get_votes, get_paper, search_papers) and the screener's score, theme, and reason for each.
 2. Work out what in the profile caused it: a theme description that is too broad or too narrow, a missing theme, a missing exclusion, or a category that brings in noise.
 3. Make the smallest edit to the draft that fixes it. Prefer sharpening a theme description over piling up exclusions, and keep the user's own wording where it still fits.
 4. Check the edit with test_draft on the papers the feedback is about plus a few well-scored papers the user didn't complain about or liked, so you see whether the fix works without collateral damage. If it doesn't, revise and test again, at most twice.
 
 If the user only asks a question, such as why a paper was recommended, answer it without editing. Draft edits are proposals: the user sees them with your test results and decides whether to apply them.
 
-Reply in plain text, under 80 words: what caused the problem, what you changed, and what the test showed (for example, "the antiviral paper drops from 8 to 2, and the three papers you liked stay at 7 or above"). The user sees the full edits and test table next to your reply, so don't list every paper. Refer to papers by short title, not ID."""
+Reply in plain text, under 80 words: what caused the problem, what you changed, and what the test showed (for example, "the antiviral paper drops from 8 to 2, and the three papers you liked stay at 7 or above"). The user sees the full edits and test table next to your reply, so don't list every paper. Refer to papers by short title, not ID. Only use paper ids that a tool returned."""
 
 _history: list[dict[str, str]] = []  # recent user/assistant messages, for follow-ups
 _proposals: dict[str, "Proposal"] = {}
@@ -140,8 +142,38 @@ def summarize(change: dict[str, Any]) -> str:
     return f'Removed category {change["before"]}'
 
 
-def _build_tools(session: Session) -> list:
-    @beta_tool
+class Tool:
+    """A function the model can call: its declaration (name, description, argument schema) and the code that runs it.
+
+    The declaration comes from the function's signature and docstring; arguments are validated before it runs.
+    """
+
+    def __init__(self, fn: Callable[..., str]):
+        self.fn = fn
+        self.name = fn.__name__
+        summary, _, args_text = (inspect.getdoc(fn) or "").partition("\nArgs:")
+        self.description = " ".join(summary.split())
+        arg_docs = dict(re.findall(r"^\s*(\w+): (.+)$", args_text, re.M))
+        fields = {}
+        for name, param in inspect.signature(fn).parameters.items():
+            default = ... if param.default is inspect.Parameter.empty else param.default
+            fields[name] = (param.annotation, Field(default, description=arg_docs.get(name)))
+        self.arguments = create_model(f"{self.name}_arguments", **fields)
+
+    def declaration(self) -> dict[str, Any]:
+        schema = self.arguments.model_json_schema()
+        schema.pop("title", None)
+        for prop in schema.get("properties", {}).values():
+            prop.pop("title", None)
+        schema["additionalProperties"] = False
+        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": schema}}
+
+    def call(self, arguments: dict[str, Any]) -> str:
+        return self.fn(**self.arguments.model_validate(arguments).model_dump())
+
+
+def _build_tools(session: Session) -> list[Tool]:
+    @Tool
     def get_profile() -> str:
         """Show the draft profile (themes with their ids, not-interested list, arXiv categories), the edits made so far in this session, and recent feedback sessions."""
         return _json({
@@ -152,7 +184,7 @@ def _build_tools(session: Session) -> list:
             "recent_feedback": store.get_recent_feedback(),
         })
 
-    @beta_tool
+    @Tool
     def get_feed_papers(limit: int = 25, include_hidden: bool = False) -> str:
         """List papers in the current feed, best first, with score, theme, the screener's reason, and the user's vote.
 
@@ -165,7 +197,7 @@ def _build_tools(session: Session) -> list:
         papers.sort(key=lambda p: p["score"], reverse=True)
         return _json([_brief(p, p, p["vote"]) for p in papers[: min(limit, 60)]])
 
-    @beta_tool
+    @Tool
     def get_votes() -> str:
         """List the papers the user voted on (liked or disliked), most recent first, with their scores and reasons."""
         session.step("Checking your votes")
@@ -177,7 +209,7 @@ def _build_tools(session: Session) -> list:
             for v in votes
         ])
 
-    @beta_tool
+    @Tool
     def get_paper(paper_id: str) -> str:
         """Get a paper's full abstract, categories, screening result, and the user's vote.
 
@@ -191,7 +223,7 @@ def _build_tools(session: Session) -> list:
         screened = session.feed.get(paper_id)
         return _json({**_brief(paper, screened, store.get_votes().get(paper_id, 0)), "abstract": paper["abstract"], "categories": paper["categories"]})
 
-    @beta_tool
+    @Tool
     def search_papers(query: str) -> str:
         """Find recent papers whose title or abstract contains all the given words. Use it to find a paper the user describes.
 
@@ -204,7 +236,7 @@ def _build_tools(session: Session) -> list:
             return "No matching papers. Try fewer or different words."
         return _json([_brief(p, session.feed.get(p["id"])) for p in papers])
 
-    @beta_tool
+    @Tool
     def add_theme(name: str, description: str) -> str:
         """Add a theme to the draft.
 
@@ -217,7 +249,7 @@ def _build_tools(session: Session) -> list:
         session.draft["themes"].append(theme)
         return f"Added theme {theme['id']} to the draft."
 
-    @beta_tool
+    @Tool
     def edit_theme(theme_id: str, name: str = "", description: str = "") -> str:
         """Change a theme's name and/or description in the draft. Empty arguments are left unchanged.
 
@@ -234,7 +266,7 @@ def _build_tools(session: Session) -> list:
             theme["description"] = description.strip()
         return "Updated the draft."
 
-    @beta_tool
+    @Tool
     def remove_theme(theme_id: str) -> str:
         """Remove a theme from the draft.
 
@@ -246,7 +278,7 @@ def _build_tools(session: Session) -> list:
         session.draft["themes"].remove(theme)
         return "Removed from the draft."
 
-    @beta_tool
+    @Tool
     def add_exclusion(text: str) -> str:
         """Add an item to the draft's not-interested list.
 
@@ -258,7 +290,7 @@ def _build_tools(session: Session) -> list:
             session.draft["not_interested"].append(text.strip())
         return "Updated the draft."
 
-    @beta_tool
+    @Tool
     def remove_exclusion(text: str) -> str:
         """Remove an item from the draft's not-interested list.
 
@@ -271,7 +303,7 @@ def _build_tools(session: Session) -> list:
         session.draft["not_interested"].remove(text)
         return "Updated the draft."
 
-    @beta_tool
+    @Tool
     def set_categories(categories: list[str]) -> str:
         """Replace the draft's arXiv categories (which papers are fetched at all).
 
@@ -285,7 +317,7 @@ def _build_tools(session: Session) -> list:
         session.draft["categories"] = list(dict.fromkeys(categories))
         return "Updated the draft. Note: new categories are fetched after the user applies the change."
 
-    @beta_tool
+    @Tool
     def test_draft(paper_ids: list[str]) -> str:
         """Re-score papers under the draft profile and compare with their current scores. Include the papers the feedback is about and a few the user liked or that score well.
 
@@ -335,27 +367,49 @@ def _short(value: Any, limit: int = 120) -> Any:
     return value
 
 
-def _run_tool(tools: dict[str, Any], block: Any) -> dict[str, Any]:
+def _run_tool(tools: dict[str, Tool], tool_call: dict[str, Any]) -> dict[str, Any]:
     """Run one tool call from the model and log it. Errors go back to the model as the result."""
-    with activity.span("tool", block.name, args={k: _short(v) for k, v in (block.input or {}).items()}) as event:
-        tool = tools.get(block.name)
+    name = tool_call["function"]["name"]
+    try:
+        arguments = json.loads(tool_call["function"].get("arguments") or "{}")
+        if not isinstance(arguments, dict):
+            raise ValueError
+    except ValueError:
+        arguments = None
+    with activity.span("tool", name, args={k: _short(v) for k, v in (arguments or {}).items()}) as event:
         try:
+            if arguments is None:
+                raise ValueError("The arguments weren't a valid JSON object.")
+            tool = tools.get(name)
             if tool is None:
-                raise ValueError(f"There is no tool named {block.name}.")
-            content = tool.call(block.input)
+                raise ValueError(f"There is no tool named {name}.")
+            text = tool.call(arguments)
+        except ValidationError as exc:
+            problems = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors())
+            return _tool_error(event, tool_call, arguments, f"Invalid arguments ({problems}).")
         except Exception as exc:
-            event.finish("error", error=str(exc), detail=[section("Arguments", block.input, open=True, format="code")])
-            return {"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {exc}", "is_error": True}
-        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            return _tool_error(event, tool_call, arguments, str(exc))
         one_line = " ".join(text.split())
         event.finish(
             result=one_line[:MAX_LOGGED_RESULT_CHARS] + ("…" if len(one_line) > MAX_LOGGED_RESULT_CHARS else ""),
             detail=[
-                section("Arguments", block.input, open=True, format="code"),
+                section("Arguments", arguments, open=True, format="code"),
                 section("Result", text, open=True, format="code" if text.lstrip().startswith(("{", "[")) else "text"),
             ],
         )
-        return {"type": "tool_result", "tool_use_id": block.id, "content": content}
+        return {"role": "tool", "tool_call_id": tool_call["id"], "content": text}
+
+
+def _tool_error(event: activity.Event, tool_call: dict[str, Any], arguments: Any, message: str) -> dict[str, Any]:
+    raw = arguments if arguments is not None else tool_call["function"].get("arguments")
+    event.finish("error", error=message, detail=[section("Arguments", raw, open=True, format="code")])
+    return {"role": "tool", "tool_call_id": tool_call["id"], "content": f"Error: {message}"}
+
+
+def _replay(message: dict[str, Any]) -> dict[str, Any]:
+    """The model's message as it goes back into the conversation, keeping every field the provider returned."""
+    kept = {k: v for k, v in message.items() if v is not None and k != "refusal"}
+    return {**kept, "role": "assistant", "content": message.get("content") or ""}
 
 
 def run(message: str, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -373,41 +427,43 @@ def run(message: str, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
             user_message += f"Earlier in this conversation:\n{history}\n"
         user_message += f"USER: {message}"
 
-        model = config.AGENT_MODEL
         tools = _build_tools(session)
         by_name = {tool.name: tool for tool in tools}
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
-        response = None
+        declarations = [tool.declaration() for tool in tools]
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        answer: dict[str, Any] = {}  # the model's latest message
+        finish = None
         # Each turn: one model request, then the tool calls it asked for
         for turn in range(1, MAX_TURNS + 1):
             with activity.span("group", f"Turn {turn}") as group:
                 response = call(
                     f"Assistant turn {turn}",
-                    model=model,
-                    max_tokens=16000,
-                    system=SYSTEM_PROMPT,
-                    tools=[tool.to_dict() for tool in tools],
                     messages=messages,
-                    output_config={"effort": "medium"},
-                    cache_control={"type": "ephemeral"},
-                    **fallback_params(model),
+                    tools=declarations,
+                    tool_choice="none" if turn == MAX_TURNS else "auto",
+                    max_tokens=4096,
                 )
-                calls = [block for block in response.content if block.type == "tool_use"]
-                if response.stop_reason != "tool_use" or not calls:
-                    group.finish(summary="wrote the reply" if response.stop_reason == "end_turn" else f"stopped: {response.stop_reason}")
+                choice = response["choices"][0]
+                answer, finish = choice["message"], choice.get("finish_reason")
+                calls = answer.get("tool_calls") or []
+                if answer.get("refusal"):
+                    raise ValueError("The model declined this request. Try rephrasing it.")
+                if not calls or turn == MAX_TURNS:
+                    group.finish(summary="wrote the reply" if finish == "stop" else f"stopped: {finish}")
                     break
-                group.update(summary="called " + ", ".join(block.name for block in calls))
-                messages.append(response.to_param())
-                messages.append({"role": "user", "content": [_run_tool(by_name, block) for block in calls]})
+                group.update(summary="called " + ", ".join(c["function"]["name"] for c in calls))
+                messages.append(_replay(answer))
+                messages.extend(_run_tool(by_name, tool_call) for tool_call in calls)
 
-        if response is None:
-            raise ValueError("The assistant returned no response.")
-        if response.stop_reason == "refusal":
-            raise ValueError("Claude declined this request. Try rephrasing it.")
-        reply = "\n".join(b.text for b in response.content if b.type == "text").strip()
-        if not reply and response.stop_reason == "tool_use":
+        reply = (answer.get("content") or "").strip()
+        if not reply:
             reply = "I ran out of steps before finishing. Here is what I drafted so far."
             activity.issue("out_of_turns", f"Stopped after {MAX_TURNS} turns without a final reply.")
+        elif finish == "length":
+            activity.issue("cut_off", "The reply was cut off at the length limit.")
         log.update(output=reply)
 
         _history.extend([{"role": "user", "text": message}, {"role": "assistant", "text": reply}])

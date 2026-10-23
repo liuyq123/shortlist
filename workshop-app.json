@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "workshop.app.v1",
+  "slug": "paperfind",
+  "title": "paperfind",
+  "description": "Today's arXiv, read for you by an AI agent. Describe your research (or pick a sample researcher) and the agent screens every new paper in your fields: titles first, then abstracts, with a score and a one-line reason each. Tell the assistant what's off and it finds the cause in your interest profile, edits a draft, and re-scores real papers under the draft before you accept the change. The Agent log shows every model request and tool call. Simplifications: arXiv only; the feed covers papers announced during your visit (the RSS feed, or the search API on weekends); one model, the one you select, does all screening and the assistant; nothing is kept after the visit ends.",
+  "runtime": {
+    "languages": ["python312"],
+    "profile": "standard",
+    "build": ["python3.12", "-m", "compileall", "-q", "app.py", "paperfind_llm"],
+    "start": ["python3.12", "app.py"],
+    "port": 8080,
+    "healthPath": "/healthz"
+  },
+  "instructions": "Pick a sample researcher, or describe your research and paste a few paper titles or arXiv links. Screening today's papers takes about a minute. Then click \"Not for me…\" on a paper, or tell the assistant what's wrong, and apply its tested proposal. Open the Agent log to watch each model request and tool call.",
+  "inference": {
+    "mode": "selectable",
+    "models": [
+      "anthropic/claude-haiku-5.5",
+      "deepseek/deepseek-v4.1-flash",
+      "openai/gpt-6-luna",
+      "z-ai/glm-5.3-flash"
+    ],
+    "defaultModel": "anthropic/claude-haiku-5.5",
+    "defaultProfile": "haiku-auto",
+    "estimatedUsdPerVisit": {"low": 0.02, "high": 0.25},
+    "estimateBasis": "Measured with Claude Haiku 5.5 at list prices through a local stand-in for the gateway: screening ~440 papers cost $0.017 (11 requests), one assistant message $0.004 (5 requests), re-screening after a change $0.014. A visit with several changes stays under about $0.25. Other models are priced differently; portal limits apply."
+  },
+  "network": {
+    "classServices": [],
+    "publicHttpsDomains": ["rss.arxiv.org", "export.arxiv.org", "arxiv.org"],
+    "publicWeb": false
+  },
+  "storage": {"visitorMiB": 0, "schema": "paperfind.v1"},
+  "integrations": []
+}

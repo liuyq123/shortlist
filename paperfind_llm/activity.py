@@ -148,7 +148,8 @@ class Run:
                 "cache_read_tokens": sum(u["cache_read_tokens"] for u in usage),
                 "cache_write_tokens": sum(u["cache_write_tokens"] for u in usage),
                 "output_tokens": sum(u["output_tokens"] for u in usage),
-                "cost_usd": sum(u["cost_usd"] for u in usage),
+                "cost_usd": sum(u["cost_usd"] for u in usage if u["cost_usd"] is not None),
+                "unpriced": sum(1 for u in usage if u["cost_usd"] is None),
             },
             "events": [e.to_dict() for e in self.events],
         }
@@ -186,7 +187,7 @@ def run(
     try:
         yield current
     except Exception as exc:
-        from paperfind_llm.claude import describe_error
+        from paperfind_llm.gateway import describe_error
 
         _end(current, "error", describe_error(exc))
         raise
@@ -268,8 +269,9 @@ def link_response(response_id: str, event: Event) -> None:
 
 
 def annotate(response: Any, **fields: Any) -> None:
-    """Add a summary or detail sections to the event for a model response (see claude.call)."""
-    event = _by_response.get(getattr(response, "id", ""))
+    """Add a summary or detail sections to the event for a model response (see gateway.call)."""
+    response_id = response.get("id", "") if isinstance(response, dict) else getattr(response, "id", "")
+    event = _by_response.get(response_id)
     if event is None:
         return
     if "detail" in fields:

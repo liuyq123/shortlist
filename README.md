@@ -1,26 +1,30 @@
 # paperfind
 
-**Today's arXiv, read for you by Claude.** Tell paperfind what you research, and it screens every new arXiv paper in your fields, shows you the ones worth reading with a one-line reason each, and lets you fix what it gets wrong by talking to an assistant. The assistant finds the cause, edits your interests, and **tests the edit on real papers before you accept it**.
+**Today's arXiv, read for you by an AI agent.** Tell paperfind what you research, and it screens every new arXiv paper in your fields, shows you the ones worth reading with a one-line reason each, and lets you fix what it gets wrong by talking to an assistant. The assistant finds the cause, edits your interests, and **tests the edit on real papers before you accept it**.
 
-There are no embeddings or vector databases. Every judgment is made by an LLM.
+There are no embeddings or vector databases. Every judgment is made by the model you select in the class app store, through the class gateway.
 
-## Quick start
+## Run locally
 
-You need Python 3.10+ and an [Anthropic API key](https://console.anthropic.com/).
+You need Git and [uv](https://docs.astral.sh/uv/). From this folder:
 
-```bash
-pip install -e .
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env     # or paste the key in the app
-paperfind-llm                                   # opens http://127.0.0.1:8000
+```sh
+cp -n .env.example .env
 ```
 
-Then either describe your research (optionally with a few paper titles, arXiv links, or a BibTeX/RIS export from Zotero), or pick a sample researcher to start immediately.
+In the [class app store](https://nyu-workshop.adityasinghal.com/), open **Account → Local development token**, choose funding, a model and a ceiling, and create a token. Put the gateway and token in `.env` as `WORKSHOP_DEVELOPMENT_URL` and `WORKSHOP_DEVELOPMENT_TOKEN`. Then start the server:
+
+```sh
+uv run --locked --env-file .env python app.py
+```
+
+It opens `http://localhost:8080`. Requests use the token's model and spend its allowance. Stop the server with Ctrl+C; that does not revoke the token, so keep its Token ID and revoke it in Account when you're done.
 
 ## What to try
 
-1. **Pick a sample researcher**, e.g. *LLM reasoning & agents*. Within about 30 seconds, today's papers in its arXiv categories are screened and ranked.
-2. **Read the reasons.** Each paper card says which of your themes it matches and why. The line above the feed shows the funnel: *557 new papers → 176 passed the title screen → 94 worth a look*.
-3. **Disagree with it.** Click **Not for me…** on a paper, or type something like *"Too many speculative decoding papers. For efficiency I only care about quantization."* Watch the assistant:
+1. **Pick a sample researcher**, e.g. *LLM reasoning & agents*. Today's papers in its arXiv categories are screened and ranked in about 30 seconds.
+2. **Read the reasons.** Each paper card says which of your interests it matches and why. The line above the feed shows the funnel: *442 new papers → 118 passed the title screen → 102 worth a look*.
+3. **Disagree with it.** Click **Not for me…** on a paper, or type something like *"Too many papers that just benchmark existing models. I want new methods."* Watch the assistant:
    - read your feed and the screener's reasons,
    - work out which part of your profile let those papers in,
    - edit a draft of your profile,
@@ -28,12 +32,12 @@ Then either describe your research (optionally with a few paper titles, arXiv li
    - revise if the test shows collateral damage, then propose the change.
 4. **Apply** the proposal. The feed is re-screened and every card shows how its score moved (↑2, ↓5, *New in your feed*).
 5. Vote 👍/👎 on a few papers and click **Learn from my votes**, or ask **Why is #1 ranked first?**
-6. Open the **Agent log** (top bar) to watch every model request and tool call as it happens. Each request shows what it was for (*Title screen, batch 2 of 3*, *Assistant turn 4*), the model, latency, tokens (including cached), cost, why it stopped, and retries. Click a row for the full prompt and the raw reply. Tool calls show their arguments, result, and duration, nested under the model turn that asked for them.
+6. Open the **Agent log** (top bar) to watch every model request and tool call as it happens. Each request shows what it was for (*Title screen, batch 2 of 3*, *Assistant turn 4*), the model, latency, tokens, the cost the gateway reported, and why it stopped. Click a row for the full prompt and the raw reply. Tool calls show their arguments, result, and duration, nested under the model turn that asked for them.
 7. Click **Show what was filtered** above the feed to see every paper the screener dropped: titles cut at pass 1, and abstracts scored below 4 with the screener's reason. **I'd want this** turns a miss into feedback for the assistant.
 
 You can also edit themes, exclusions, and categories directly in the left panel.
 
-Nothing fails silently: a failed batch, a refused request, or papers the model skipped twice are listed as problems on the run in the log, and the feed says how many papers weren't screened, with a Retry button.
+Nothing fails silently: a failed batch, a declined or unreadable reply, or papers the model skipped twice are listed as problems on the run in the log, and the feed says how many papers weren't screened, with a Retry button.
 
 ## How it works
 
@@ -41,55 +45,73 @@ Nothing fails silently: a failed batch, a refused request, or papers the model s
 arXiv RSS (today's new papers in your categories)
         │
         ▼
-Pass 1: title screen      Claude Haiku 5.5, 150 titles per call, keeps anything plausibly relevant
+Pass 1: title screen      150 titles per request, keeps anything plausibly relevant
         │
         ▼
-Pass 2: abstract scoring  Claude Haiku 5.5, 15 abstracts per call → score 0–10, theme, reason
+Pass 2: abstract scoring  15 abstracts per request → score 0–10, interest, reason
         │
         ▼
-Feed (score ≥ 4), cached per (paper, profile version) so nothing is paid for twice
+Feed (score ≥ 4), cached per (paper, profile version) so nothing is screened twice
         ▲
         │ edits, after you approve
-Assistant                 Claude Opus 5.5 with 12 tools: inspect feed/votes/papers,
+Assistant                 the same model with 12 tools: inspect feed/votes/papers,
                           edit a draft profile, test_draft (re-score papers under the draft)
 ```
 
-- **Interest profile.** 3–8 themes, each with a specific description, plus a "not interested" list and arXiv categories. Claude Opus builds it from your description and papers. It is the only thing that controls the feed, which keeps the system explainable: every score cites a theme.
-- **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about 30% survive) and costs a fraction of a cent. Only the survivors get their abstracts read. A day of ~550 papers costs **about 2¢** and takes about 25 seconds.
-- **The assistant is an agent, not a single prompt.** It decides what to look at, forms a hypothesis about what in the profile caused the problem, makes an edit, and checks it with `test_draft` before proposing it. Nothing is saved until you click Apply.
-- **Costs are visible.** The header shows what this session has spent. A typical assistant conversation costs 10–15¢.
-- **One wrapper for every model request** (`claude.call`). It does the retries itself, so they show up in the log, and it records the prompt, the raw reply, tokens, and cost. It is also the one place to change to use another model provider.
+- **Interest profile.** 3–8 themes, each with a specific description, plus a "not interested" list and arXiv categories. The model builds it from your description and papers. It is the only thing that controls the feed, which keeps the system explainable: every score cites an interest.
+- **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about a quarter survive), and only the survivors get their abstracts read. A day of ~450 papers takes about 11 requests.
+- **The assistant is an agent, not a single prompt.** It decides what to look at, forms a hypothesis about what in the profile caused the problem, makes an edit, and checks it with `test_draft` before proposing it. Nothing is saved until you click Apply. Its last allowed turn must answer without tools.
+- **Structured replies are checked by the app.** Screening and profile building ask for JSON, validated before use. An unreadable reply gets one fresh request; a failed gateway request is never resent, because the broker owns retries.
+- **One gateway wrapper** (`gateway.call`) makes every model request with the visitor's selected model and profile, and records the prompt, raw reply, tokens, and reported cost for the Agent log.
+
+## Publish to the class app store
+
+1. In **My app**, claim an address and put the same value in `slug` in `workshop-app.json`.
+2. Build a fresh ZIP. If your address is `paperfind`:
+
+   ```sh
+   uv run --locked python package.py --slug paperfind --output ../paperfind.zip
+   ```
+
+   The packager checks the slug, includes only the files the app needs (manifest and lockfile at the root), and leaves out `.env`, `.local/` and caches.
+3. In **My app**, select the ZIP, choose **Publish ZIP**, and follow the build status. For later updates, keep the slug and use **Publish replacement ZIP**.
+
+In a hosted visit the platform supplies the gateway, run token, and port. The app listens on `0.0.0.0`, answers `/healthz` without any model or network call, reaches arXiv only through the platform proxy (the arXiv hosts are declared in the manifest), and keeps its data in the visit's temporary directory.
 
 ## Configuration
 
-Set these in `.env` (working directory or `~/.paperfind-llm/.env`):
+Set these in `.env` for local runs:
 
 | Variable | Default | |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (none) | Required, or paste it in the app (kept in memory only) |
-| `SCREEN_MODEL` | `claude-haiku-5-5` | Model for both screening passes |
-| `AGENT_MODEL` | `claude-opus-5-5` | Model for the profile builder and the assistant |
+| `WORKSHOP_DEVELOPMENT_URL` | (none) | The development gateway from Account, ending in `/api/development` |
+| `WORKSHOP_DEVELOPMENT_TOKEN` | (none) | Your local development token. Keep it out of source files and ZIPs |
+| `PORT` | `8080` | |
 | `WINDOW_DAYS` | `3` | How many days of papers the feed covers |
-| `PAPERFIND_LLM_DATA_DIR` | `~/.paperfind-llm` | Where the SQLite database and profile live |
+| `PAPERFIND_LLM_DATA_DIR` | `.local` | Where the SQLite database and profile live |
 
 ## Project layout
 
 ```
+app.py              entry point (python app.py), used by the platform and locally
+workshop-app.json   the class app manifest: runtime, models, network, storage
+package.py          builds the upload ZIP
 paperfind_llm/
-  app.py          FastAPI server; long operations stream progress as NDJSON
-  activity.py     the agent log: runs, model requests, tool calls, problems
-  screen.py       two-pass screening, caching, the ranked feed, and what was filtered
-  assistant.py    the feedback agent: tools, draft profile, test_draft, proposals
-  profile.py      building the interest profile; parsing BibTeX/RIS/arXiv links; personas
-  arxiv.py        arXiv RSS feed, search API fallback, paper lookups
-  store.py        SQLite storage and profile.json
-  claude.py       the wrapper every model request goes through: retries, logging, cost
-  static/         the single-page UI (plain HTML/CSS/JS, no build step)
+  gateway.py        the class gateway: bootstrap, the one wrapper for every model request, costs
+  app.py            FastAPI server; long operations stream progress as NDJSON; /healthz
+  activity.py       the agent log: runs, model requests, tool calls, problems
+  screen.py         two-pass screening, caching, the ranked feed, and what was filtered
+  assistant.py      the feedback agent: tools, draft profile, test_draft, proposals
+  profile.py        building the interest profile; parsing BibTeX/RIS/arXiv links; personas
+  arxiv.py          arXiv RSS feed, search API fallback, paper lookups (through the proxy when hosted)
+  store.py          SQLite storage and profile.json
+  static/           the single-page UI (plain HTML/CSS/JS, no build step)
 ```
 
 ## Limitations
 
-- arXiv only. The RSS feed has one announcement a day, so the feed builds up over the days you use it. On weekends it falls back to arXiv's search API, which is rate-limited.
+- arXiv only. The RSS feed has one announcement a day, so a visit sees today's papers. On weekends it falls back to arXiv's search API, which is rate-limited.
+- One model, the one selected in the class app store, does the screening, profile building, and the assistant. Smaller models give rougher scores and weaker assistant edits.
 - LLM scores vary a little between runs, so papers near the cutoff (scores 4–5) can move in or out when the feed is re-screened.
 - `test_draft` re-runs only the abstract pass. A draft that changes the title pass is checked when you apply it.
-- The agent log is kept in memory for the last 30 runs and is cleared when the server restarts.
+- Everything (your interests, votes, the agent log) lasts for one hosted visit; the agent log also clears when a local server restarts.

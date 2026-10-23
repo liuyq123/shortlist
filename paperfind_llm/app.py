@@ -3,9 +3,10 @@ Web app: a FastAPI backend for the single-page UI in static/.
 
 Long operations (building a profile, refreshing the feed, the assistant) stream
 newline-delimited JSON events so the page can show progress as it happens:
-    {"type": "run" | "step" | "progress" | "test" | "done" | "error", ..., "cost_usd": 0.0123}
+    {"type": "run" | "step" | "progress" | "test" | "done" | "error", ..., "usage": {...}}
 
 The Agent log view polls /api/log for what each run did (see activity.py).
+/healthz answers the platform's readiness check without any model or network call.
 """
 
 import json
@@ -16,13 +17,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paperfind_llm import activity, arxiv, assistant, config, screen, store
+from paperfind_llm import activity, arxiv, assistant, config, gateway, screen, store
 from paperfind_llm import profile as profiles
-from paperfind_llm.claude import describe_error, get_client, has_api_key, session_usage, set_api_key
+from paperfind_llm.gateway import describe_error, session_usage
 
 STATIC_DIR = Path(__file__).parent / "static"
 logger = logging.getLogger("paperfind_llm")
@@ -39,6 +40,7 @@ def _stream(job: Callable[[Emit], Optional[dict[str, Any]]]) -> StreamingRespons
 
     def run() -> None:
         try:
+            gateway.bootstrap()  # the visitor may have changed model or funding in the portal
             result = job(events.put) or {}
             events.put({"type": "done", **result})
         except Exception as exc:
@@ -51,7 +53,7 @@ def _stream(job: Callable[[Emit], Optional[dict[str, Any]]]) -> StreamingRespons
 
     def lines():
         while (event := events.get()) is not None:
-            event["cost_usd"] = round(session_usage.cost_usd, 4)
+            event["usage"] = session_usage.to_dict()
             yield json.dumps(event, ensure_ascii=False) + "\n"
 
     return StreamingResponse(lines(), media_type="application/x-ndjson")
@@ -69,35 +71,36 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/healthz")
+def healthz() -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
+
+def _connection() -> dict[str, Any]:
+    """Which model and funding the gateway selected, or why it isn't connected. Free: no inference."""
+    info: dict[str, Any] = {"hosted": config.HOSTED, "configured": gateway.configured(), "model": None, "funding": None, "error": None}
+    if info["configured"]:
+        try:
+            chosen = gateway.bootstrap()
+            info.update(model=chosen.model, funding=chosen.funding)
+        except gateway.GatewayError as exc:
+            info["error"] = describe_error(exc)
+    return info
+
+
 @app.get("/api/state")
 def state() -> dict[str, Any]:
     return {
-        "has_key": has_api_key(),
+        "connection": _connection(),
         "profile": store.load_profile(),
         "personas": [
             {"id": p["id"], "label": p["label"], "blurb": p["blurb"]}
             for p in profiles.load_personas().values()
         ],
         "categories": arxiv.CATEGORIES,
-        "models": {"screen": config.SCREEN_MODEL, "assistant": config.AGENT_MODEL},
         "window_days": config.WINDOW_DAYS,
-        "cost_usd": round(session_usage.cost_usd, 4),
+        "usage": session_usage.to_dict(),
     }
-
-
-class KeyBody(BaseModel):
-    key: str
-
-
-@app.post("/api/key")
-def save_key(body: KeyBody) -> dict[str, Any]:
-    set_api_key(body.key)
-    try:
-        get_client().models.list(limit=1)  # free check that the key works
-    except Exception as exc:
-        set_api_key("")
-        raise HTTPException(400, describe_error(exc))
-    return {"ok": True}
 
 
 @app.post("/api/profile/build")

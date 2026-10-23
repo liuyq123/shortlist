@@ -1,4 +1,4 @@
-"""Start the app: paperfind-llm [--port 8000] [--no-browser]"""
+"""Start the app. Locally: uv run --locked --env-file .env python app.py (opens a browser tab unless --no-browser)."""
 
 import argparse
 import logging
@@ -7,22 +7,24 @@ import webbrowser
 
 import uvicorn
 
+from paperfind_llm import config
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="paperfind-llm",
-        description="Daily arXiv papers screened by Claude, tuned by talking to an assistant.",
+        prog="paperfind",
+        description="Daily arXiv papers screened by an AI agent, tuned by talking to an assistant.",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=config.HOST)
+    parser.add_argument("--port", type=int, default=config.PORT)
     parser.add_argument("--no-browser", action="store_true", help="Don't open a browser tab")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    url = f"http://{args.host}:{args.port}"
-    if not args.no_browser:
+    url = f"http://{'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host}:{args.port}"
+    if not (args.no_browser or config.HOSTED):
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    print(f"paperfind is running at {url}  (Ctrl+C to stop)")
+    print(f"paperfind is running at {url}  (Ctrl+C to stop)", flush=True)
     uvicorn.run("paperfind_llm.app:app", host=args.host, port=args.port, log_level="warning")
 
 

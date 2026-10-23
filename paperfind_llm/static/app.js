@@ -6,7 +6,7 @@
 
 const state = {
   ready: false,
-  hasKey: false,
+  connection: null,       // {hosted, configured, model, funding, error} from the class gateway
   profile: null,
   personas: [],
   categories: {},
@@ -95,7 +95,7 @@ async function streamEvents(path, options, onEvent) {
       buffer = buffer.slice(newline + 1);
       if (!line) continue;
       const event = JSON.parse(line);
-      if (event.cost_usd !== undefined) setCost(event.cost_usd);
+      if (event.usage) setCost(event.usage);
       if (event.type === "error") throw new Error(event.message);
       if (event.type === "done") final = event;
       else onEvent(event);
@@ -111,8 +111,24 @@ const jsonBody = (body) => ({ headers: { "Content-Type": "application/json" }, b
 // Helpers
 // ============================================================================
 
-function setCost(usd) {
-  $("#cost").innerHTML = `$${usd.toFixed(3)}<span class="pill-suffix"> spent</span>`;
+// The header shows what the gateway reported this session costs, or tokens if it reported no costs
+function setCost(usage) {
+  const pill = $("#cost");
+  if (usage.requests && usage.unpriced === usage.requests) {
+    pill.innerHTML = `${fmtTokens(tokensIn(usage) + usage.output_tokens)}<span class="pill-suffix"> tokens</span>`;
+  } else {
+    pill.innerHTML = `$${usage.cost_usd.toFixed(3)}<span class="pill-suffix"> spent</span>`;
+  }
+}
+
+function showConnection() {
+  const chip = $("#model");
+  const connection = state.connection;
+  chip.hidden = !connection?.model;
+  if (!connection?.model) return;
+  const funding = { class: "class allowance", personal: "your account" }[connection.funding];
+  chip.textContent = modelName(connection.model);
+  chip.title = `Model selected in the class app store${funding ? `, paid from ${funding}` : ""}: ${connection.model}`;
 }
 
 let toastTimer = null;
@@ -139,11 +155,19 @@ function shortTitle(title, max = 70) {
   return title.length > max ? `${title.slice(0, max - 1)}…` : title;
 }
 
-// "claude-haiku-5-5" -> "Haiku 5.5"; other model ids are shown as they are
+// "deepseek/deepseek-v4.1-flash" -> "DeepSeek V4.1 Flash", "anthropic/claude-haiku-5.5" -> "Claude Haiku 5.5"
+const MODEL_WORDS = { deepseek: "DeepSeek", gpt: "GPT", glm: "GLM" };
 function modelName(id) {
-  const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || "");
-  if (!match) return id || "";
-  return `${match[1][0].toUpperCase()}${match[1].slice(1)} ${match[2]}${match[3] ? `.${match[3]}` : ""}`;
+  if (!id) return "";
+  return id.split("/").pop().split("-")
+    .map((word) => MODEL_WORDS[word] || word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+// Costs come from the gateway; a request it didn't price counts as unknown
+function costText(usd, unpriced = 0, requests = 1) {
+  if (unpriced && unpriced >= requests) return "cost not reported";
+  return fmtCost(usd || 0) + (unpriced ? "+" : "");
 }
 
 function fmtTokens(n) {
@@ -230,7 +254,8 @@ function render() {
   $("#reset-btn").hidden = !state.profile;
   updateNav();
   if (!state.ready) return;
-  if (!state.hasKey) return renderKey();
+  showConnection();
+  if (!state.connection.configured || state.connection.error) return renderConnect();
   if (!state.profile) return renderOnboarding();
   ensureWorkspace();
   renderInterests();
@@ -238,36 +263,31 @@ function render() {
   renderAssistant();
 }
 
-function renderKey() {
+function renderConnect() {
+  const connection = state.connection;
+  const problem = connection.error
+    ? `<div class="banner error">${esc(connection.error)}</div>`
+    : "";
+  const steps = connection.hosted
+    ? `<p>This visit couldn't reach the class gateway. Start a new visit from the class app store.</p>`
+    : `<ol class="connect-steps">
+        <li>Sign in to the <a href="https://nyu-workshop.adityasinghal.com/" target="_blank" rel="noopener">class app store</a> and open <b>Account → Local development token</b>.</li>
+        <li>Choose funding, a model and a ceiling, then create the token.</li>
+        <li>Put the gateway and token in <code>.env</code> as <code>WORKSHOP_DEVELOPMENT_URL</code> and <code>WORKSHOP_DEVELOPMENT_TOKEN</code>.</li>
+        <li>Restart the server and reload this page.</li>
+      </ol>`;
   $("#app").innerHTML = `
     <div class="center-wrap">
       <div class="hero">
-        <h1>Connect Claude</h1>
-        <p>paperfind reads today's arXiv with your own Anthropic API key. A day of screening costs about 2¢; each assistant conversation about 10–15¢.</p>
+        <h1>Connect to the class gateway</h1>
+        <p>paperfind reads today's arXiv with the model you choose in the class app store. Requests are paid from the allowance you select there.</p>
       </div>
-      <form class="card-box" id="key-form">
-        <label class="field-label" for="key-input">Anthropic API key</label>
-        <input type="password" id="key-input" placeholder="sk-ant-…" autocomplete="off" required>
-        <p class="field-hint">Kept in memory on this machine only. To skip this step, put ANTHROPIC_API_KEY in a .env file and restart.</p>
+      <div class="card-box">${problem}${steps}
         <div class="row" style="margin-top:14px"><div class="spacer"></div>
-          <button class="btn primary" type="submit">Continue</button>
+          <button class="btn primary" data-action="reconnect">Check again</button>
         </div>
-      </form>
+      </div>
     </div>`;
-  $("#key-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = event.target.querySelector("button");
-    button.disabled = true;
-    try {
-      await api("/api/key", { method: "POST", body: JSON.stringify({ key: $("#key-input").value }) });
-      state.hasKey = true;
-      render();
-      if (state.profile) refreshFeed();
-    } catch (err) {
-      toast(err.message);
-      button.disabled = false;
-    }
-  });
 }
 
 function renderOnboarding() {
@@ -280,7 +300,7 @@ function renderOnboarding() {
     <div class="center-wrap">
       <div class="hero">
         <h1>What do you research?</h1>
-        <p>Tell paperfind in a sentence or two and add a few papers you like. Claude turns that into an interest profile, then reads every new arXiv paper for you.</p>
+        <p>Tell paperfind in a sentence or two and add a few papers you like. The model turns that into an interest profile, then reads every new arXiv paper for you.</p>
       </div>
       <div class="card-box">
         <label class="field-label" for="desc">Your research</label>
@@ -378,7 +398,7 @@ function renderInterests() {
 
   el.innerHTML = `
     <h2>Your interests</h2>
-    <p class="panel-intro">Claude screens every new paper against these. Edit them here or ask the assistant.</p>
+    <p class="panel-intro">The model screens every new paper against these. Edit them here or ask the assistant.</p>
     ${profile.themes.map((t) => (state.editing === t.id ? themeEditor(t) : themeCard(t))).join("")}
     ${state.editing === "new"
       ? themeEditor({ id: "", name: "", description: "" })
@@ -485,7 +505,7 @@ function renderFeed() {
   if (feed && !refreshing && !state.refreshError) html += problemsBanner(feed.stats);
   if (state.feedStale && !refreshing) {
     html += `<div class="banner">Your interests changed. Re-screen today's papers to see the effect.
-      <span class="muted small">About 30 s and 2¢.</span><div class="spacer"></div>
+      <span class="muted small">About a minute.</span><div class="spacer"></div>
       <button class="btn small primary" data-action="rescreen">Re-screen</button></div>`;
   }
 
@@ -594,7 +614,7 @@ function paperCard(paper) {
 
   return `
     <article class="${classes}">
-      <div class="score ${scoreClass}" title="Claude's relevance score (0–10)">${score}${delta}</div>
+      <div class="score ${scoreClass}" title="The model's relevance score (0–10)">${score}${delta}</div>
       <div>
         <div class="paper-meta">
           ${theme ? `<span class="theme-tag" style="--c:${colorFor(theme)}">${esc(theme.name)}</span>` : `<span class="theme-tag">${esc(paper.theme && paper.theme !== "none" ? paper.theme : "Other")}</span>`}
@@ -945,7 +965,7 @@ function logLink(runId, text, cls = "link-btn log-link") {
 
 function updateNav() {
   const nav = $("#views");
-  nav.hidden = !(state.ready && state.hasKey);
+  nav.hidden = !(state.ready && state.connection?.configured && !state.connection.error);
   for (const button of nav.querySelectorAll("button")) {
     button.classList.toggle("active", button.dataset.view === state.view);
   }
@@ -1057,7 +1077,7 @@ function renderLogTotals() {
     <div><b>${usage.requests}</b><span>model requests</span></div>
     <div><b>${fmtTokens(tokensIn(usage))}</b><span>tokens in<span class="cached"> (${fmtTokens(usage.cache_read_tokens)} cached)</span></span></div>
     <div><b>${fmtTokens(usage.output_tokens)}</b><span>tokens out</span></div>
-    <div><b>${fmtCost(usage.cost_usd)}</b><span>this session</span></div>`;
+    <div><b>${costText(usage.cost_usd, usage.unpriced, usage.requests)}</b><span>this session</span></div>`;
 }
 
 function renderRunList() {
@@ -1086,7 +1106,7 @@ function runItem(run) {
         <span class="run-when">${fmtAgo(run.started_at)}</span>${status}</span>
       <span class="run-title">${esc(run.title)}</span>
       <span class="run-sub"><span ${running ? `data-since="${run.started_at}"` : ""}>${fmtDur(run.duration)}</span>
-        · ${run.totals.requests ? `${plural(run.totals.requests, "request")} · ${fmtCost(run.totals.cost_usd)}` : "no model requests"}</span>
+        · ${run.totals.requests ? `${plural(run.totals.requests, "request")} · ${costText(run.totals.cost_usd, run.totals.unpriced, run.totals.requests)}` : "no model requests"}</span>
     </button>`;
 }
 
@@ -1125,7 +1145,7 @@ function renderRunDetail() {
           <span>${plural(t.requests, "model request")}</span>
           <span>${fmtTokens(tokensIn(t))} tokens in (${fmtTokens(t.cache_read_tokens)} cached)</span>
           <span>${fmtTokens(t.output_tokens)} out</span>
-          <span>${fmtCost(t.cost_usd)}</span>` : `<span>No model requests</span>`}
+          <span>${costText(t.cost_usd, t.unpriced, t.requests)}</span>` : `<span>No model requests</span>`}
       </div>
       ${run.summary ? `<div class="run-summary">${esc(run.summary)}</div>` : ""}
       ${run.error ? `<div class="banner error">${esc(run.error)}</div>` : ""}
@@ -1205,7 +1225,8 @@ function eventLines(event) {
     const meta = [modelName(event.model)];
     if (event.usage) {
       const u = event.usage;
-      meta.push(`${fmtTokens(tokensIn(u))} in${u.cache_read_tokens ? ` (${fmtTokens(u.cache_read_tokens)} cached)` : ""} · ${fmtTokens(u.output_tokens)} out`, fmtCost(u.cost_usd));
+      meta.push(`${fmtTokens(tokensIn(u))} in${u.cache_read_tokens ? ` (${fmtTokens(u.cache_read_tokens)} cached)` : ""} · ${fmtTokens(u.output_tokens)} out`);
+      if (u.cost_usd !== null) meta.push(fmtCost(u.cost_usd));
     }
     if (event.stop_reason) meta.push(`stop: ${event.stop_reason}`);
     if (event.retries) meta.push(`<span class="warn-text">${plural(event.retries, "retry", "retries")}</span>`);
@@ -1401,6 +1422,7 @@ const actions = {
     categories: state.profile.categories.filter((c) => c !== el.dataset.code),
   }),
   suggest: (el) => ask(el.dataset.text),
+  reconnect: () => window.location.reload(),
   apply: (el) => applyProposal(Number(el.dataset.index)),
   discard: (el) => discardProposal(Number(el.dataset.index)),
   "open-report": () => openReport(),
@@ -1459,18 +1481,17 @@ document.addEventListener("toggle", (event) => {
 (async function init() {
   try {
     const data = await api("/api/state");
-    state.hasKey = data.has_key;
+    state.connection = data.connection;
     state.personas = data.personas;
     state.categories = data.categories;
-    state.models = data.models;
-    setCost(data.cost_usd);
+    setCost(data.usage);
     state.ready = true;
     if (data.profile) {
       setProfile(data.profile);
       state.flash.clear();
     }
     render();
-    if (state.profile && state.hasKey) {
+    if (state.profile && state.connection.configured && !state.connection.error) {
       setTab("feed");
       refreshFeed();
     }

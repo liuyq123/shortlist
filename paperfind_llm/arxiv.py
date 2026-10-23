@@ -7,17 +7,23 @@ arXiv client.
   is empty (weekends and holidays). arXiv rate-limits this API (one request per
   3 seconds, and 429 responses when busy), so it is the fallback.
 - fetch_by_ids: look up papers the user pasted.
+
+In a hosted visit every request goes through the platform's proxy, and the
+manifest declares the arXiv hosts (workshop-app.json, network.publicHttpsDomains).
 """
 
+import base64
 import html
+import os
 import re
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
+from http.client import HTTPSConnection
 from typing import Any, Callable, Optional
+
+from paperfind_llm import config
 
 RSS_URL = "https://rss.arxiv.org/rss/"
 API_URL = "https://export.arxiv.org/api/query"
@@ -113,24 +119,71 @@ class ArxivError(Exception):
     """arXiv could not be reached or is rate-limiting us."""
 
 
+class _HTTPStatusError(Exception):
+    def __init__(self, status: int, retry_after: Optional[str]):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+        self.retry_after = retry_after
+
+
+def _proxy() -> Optional[urllib.parse.SplitResult]:
+    """The platform proxy in a hosted visit; None when running locally."""
+    if not config.HOSTED:
+        return None
+    value = next((os.environ[k] for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy") if os.environ.get(k)), "")
+    if not value:
+        raise ArxivError("This hosted visit has no proxy for reaching arXiv.")
+    return urllib.parse.urlsplit(value)
+
+
+def _fetch(url: str, timeout: float = TIMEOUT_SECONDS) -> bytes:
+    """GET an https URL, following redirects. Hosted visits always tunnel through the proxy; NO_PROXY never bypasses it."""
+    for _ in range(4):
+        target = urllib.parse.urlsplit(url)
+        proxy = _proxy()
+        if proxy:
+            connection = HTTPSConnection(proxy.hostname, proxy.port or 80, timeout=timeout)
+            headers = {}
+            if proxy.username:
+                login = f"{urllib.parse.unquote(proxy.username)}:{urllib.parse.unquote(proxy.password or '')}"
+                headers["Proxy-Authorization"] = "Basic " + base64.b64encode(login.encode()).decode()
+            connection.set_tunnel(target.hostname, target.port or 443, headers=headers)
+        else:
+            connection = HTTPSConnection(target.hostname, target.port or 443, timeout=timeout)
+        try:
+            path = (target.path or "/") + (f"?{target.query}" if target.query else "")
+            connection.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+            response = connection.getresponse()
+            body = response.read()
+        finally:
+            connection.close()
+        if response.status in (301, 302, 303, 307, 308) and response.getheader("Location"):
+            url = urllib.parse.urljoin(url, response.getheader("Location"))
+            continue
+        if response.status != 200:
+            raise _HTTPStatusError(response.status, response.getheader("Retry-After"))
+        return body
+    raise ArxivError(f"Too many redirects from {url}")
+
+
 def _get(url: str, attempts: int = 3) -> ET.Element:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     last_error: Optional[Exception] = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return ET.fromstring(response.read())
-        except urllib.error.HTTPError as exc:
+            return ET.fromstring(_fetch(url))
+        except ArxivError:
+            raise
+        except _HTTPStatusError as exc:
             last_error = exc
-            if exc.code == 429:
+            if exc.status == 429:
                 if attempt + 1 < attempts:
-                    time.sleep(min(float(exc.headers.get("Retry-After") or 20), 60))
+                    time.sleep(min(float(exc.retry_after or 20), 60))
                 continue
             time.sleep(REQUEST_GAP_SECONDS * (attempt + 1))
         except Exception as exc:  # timeouts and connection errors
             last_error = exc
             time.sleep(REQUEST_GAP_SECONDS * (attempt + 1))
-    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+    if isinstance(last_error, _HTTPStatusError) and last_error.status == 429:
         raise ArxivError("arXiv is rate-limiting requests right now. Try again in a few minutes.")
     raise ArxivError(f"Could not reach arXiv: {last_error}")
 
@@ -234,9 +287,7 @@ def fetch_recent(
 
 def _fetch_abs_page(paper_id: str) -> Optional[dict[str, Any]]:
     """Title and abstract from a paper's arxiv.org page (served separately from the API)."""
-    request = urllib.request.Request(f"https://arxiv.org/abs/{paper_id}", headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        page = response.read().decode("utf-8", errors="replace")
+    page = _fetch(f"https://arxiv.org/abs/{paper_id}", timeout=20).decode("utf-8", errors="replace")
 
     def meta(name: str) -> str:
         match = re.search(rf'<meta name="{name}" content="([^"]*)"', page)

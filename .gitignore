@@ -1,4 +1,7 @@
 .env
 .venv/
+.local/
 __pycache__/
 *.egg-info/
+*.zip
+trash-*/
