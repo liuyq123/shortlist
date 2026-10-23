@@ -14,12 +14,17 @@
       <span class="brand-name">paperfind</span>
       <span class="tagline">today's arXiv, read for you by Claude</span>
     </div>
+    <nav class="views" id="views" hidden>
+      <button data-action="view" data-view="feed" class="active">Feed</button>
+      <button data-action="view" data-view="log">Agent log<span class="live-dot" id="live-dot" hidden></span></button>
+    </nav>
     <div class="topbar-right">
-      <span id="cost" class="pill" title="Claude API spend since the app started">$0.000</span>
+      <button id="cost" class="pill" data-action="view" data-view="log" title="Model API spend since the app started. Click for the agent log.">$0.000</button>
       <button id="reset-btn" class="link-btn" hidden>Start over</button>
     </div>
   </header>
   <main id="app"><div class="loading">Loading…</div></main>
+  <main id="log-view" hidden></main>
   <div id="toast" class="toast" role="status" hidden></div>
   <script src="/static/app.js"></script>
 </body>

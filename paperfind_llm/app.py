@@ -3,7 +3,9 @@ Web app: a FastAPI backend for the single-page UI in static/.
 
 Long operations (building a profile, refreshing the feed, the assistant) stream
 newline-delimited JSON events so the page can show progress as it happens:
-    {"type": "step" | "progress" | "test" | "done" | "error", ..., "cost_usd": 0.0123}
+    {"type": "run" | "step" | "progress" | "test" | "done" | "error", ..., "cost_usd": 0.0123}
+
+The Agent log view polls /api/log for what each run did (see activity.py).
 """
 
 import json
@@ -18,7 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paperfind_llm import arxiv, assistant, config, screen, store
+from paperfind_llm import activity, arxiv, assistant, config, screen, store
 from paperfind_llm import profile as profiles
 from paperfind_llm.claude import describe_error, get_client, has_api_key, session_usage, set_api_key
 
@@ -165,22 +167,37 @@ def reset() -> dict[str, Any]:
 
 class RefreshBody(BaseModel):
     force: bool = False
+    changed: bool = False  # the interests changed since the last screening
 
 
 @app.post("/api/feed/refresh")
 def refresh_feed(body: RefreshBody) -> StreamingResponse:
     profile = _require_profile()
-
-    def job(emit: Emit) -> dict[str, Any]:
-        screen.refresh(profile, emit, force_fetch=body.force)
-        return {"feed": screen.get_feed(profile)}
-
-    return _stream(job)
+    return _stream(lambda emit: screen.refresh(profile, emit, force_fetch=body.force, changed=body.changed))
 
 
 @app.get("/api/feed")
 def feed() -> dict[str, Any]:
     return screen.get_feed(_require_profile())
+
+
+@app.get("/api/feed/report")
+def feed_report() -> dict[str, Any]:
+    """What the screener did with every paper: shown, scored low, dropped by title, or not screened yet."""
+    return screen.get_report(_require_profile())
+
+
+@app.get("/api/log")
+def log(since: int = 0) -> dict[str, Any]:
+    return {**activity.snapshot(since), "usage": session_usage.to_dict()}
+
+
+@app.get("/api/log/events/{event_id}")
+def log_event(event_id: int) -> dict[str, Any]:
+    detail = activity.event_detail(event_id)
+    if detail is None:
+        raise HTTPException(404, "That log entry is no longer kept.")
+    return {"sections": detail}
 
 
 class VoteBody(BaseModel):

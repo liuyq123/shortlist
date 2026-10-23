@@ -11,16 +11,18 @@ cached as the system prompt, so a day of papers costs about a cent. Results are
 stored per (paper, profile version), so nothing is screened twice.
 """
 
+import contextvars
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from threading import Lock
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
-from paperfind_llm import arxiv, config, store
-from paperfind_llm.claude import fallback_params, get_client, session_usage
+from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm.activity import section
+from paperfind_llm.claude import call, describe_error, fallback_params
 from paperfind_llm.profile import profile_hash, render
 
 TITLE_BATCH_SIZE = 150
@@ -68,6 +70,10 @@ OutputT = TypeVar("OutputT", bound=BaseModel)
 Emit = Callable[[dict[str, Any]], None]
 
 
+class ScreeningError(Exception):
+    """A batch the model declined, or whose reply couldn't be read."""
+
+
 def _clean_reason(text: str) -> str:
     """Trim stray trailing punctuation the model sometimes leaves, e.g. 'heads.),'."""
     text = text.strip().rstrip(",; ")
@@ -83,14 +89,18 @@ def window_start() -> str:
 class Screener:
     """Screening calls for one profile."""
 
-    def __init__(self, profile: dict[str, Any]):
+    def __init__(self, profile: dict[str, Any], draft: bool = False):
         self.profile_text = render(profile)
         self.model = config.SCREEN_MODEL
-        self.client = get_client(max_retries=4)
+        self.draft = draft  # scoring an unsaved draft, for the assistant's test_draft
+        self.skipped = 0  # papers the model left out of its scores twice, across batches
+        self._lock = Lock()
 
-    def _call(self, system_template: str, user: str, output_format: type[OutputT]) -> Optional[OutputT]:
-        response = self.client.beta.messages.parse(
+    def _call(self, purpose: str, system_template: str, user: str, output_format: type[OutputT]) -> tuple[Any, OutputT]:
+        response = call(
+            purpose,
             model=self.model,
+            retries=4,
             max_tokens=8000,
             # The profile is the same for every batch, so cache it
             system=[{
@@ -103,23 +113,29 @@ class Screener:
             output_config={"effort": "low"},
             **fallback_params(self.model),
         )
-        session_usage.add(response.usage, self.model)
         if response.stop_reason == "refusal":
-            return None
-        return response.parsed_output
+            raise ScreeningError("The model declined this batch.")
+        if response.parsed_output is None:
+            raise ScreeningError(f"The model's reply couldn't be read (stop reason: {response.stop_reason}).")
+        return response, response.parsed_output
 
-    def screen_titles(self, batch: list[dict[str, Any]]) -> list[tuple[str, bool]]:
+    def screen_titles(self, batch: list[dict[str, Any]], where: str) -> list[tuple[str, bool]]:
         lines = [f"{i}. {paper['title']}" for i, paper in enumerate(batch, 1)]
-        result = self._call(TITLE_SYSTEM_PROMPT, "Titles:\n" + "\n".join(lines), TitleScreen)
-        if result is None:
-            return []
+        response, result = self._call(f"Title screen, {where}", TITLE_SYSTEM_PROMPT, "Titles:\n" + "\n".join(lines), TitleScreen)
         selected = {i for i in result.selected if 1 <= i <= len(batch)}
+        kept = [paper["title"] for i, paper in enumerate(batch, 1) if i in selected]
+        dropped = [paper["title"] for i, paper in enumerate(batch, 1) if i not in selected]
+        activity.annotate(response, summary=f"kept {len(kept)} of {len(batch)} titles", detail=[
+            section(f"Kept ({len(kept)})", kept, open=True, format="list"),
+            section(f"Dropped ({len(dropped)})", dropped, format="list"),
+        ])
         return [(paper["id"], i in selected) for i, paper in enumerate(batch, 1)]
 
-    def score_abstracts(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def score_abstracts(self, batch: list[dict[str, Any]], where: str) -> list[dict[str, Any]]:
+        task = "Scoring under the draft" if self.draft else "Abstract scoring"
         scores: dict[str, dict[str, Any]] = {}
         # The model occasionally skips papers in a batch; ask once more for the missing ones
-        for _ in range(2):
+        for attempt in range(2):
             missing = [paper for paper in batch if paper["id"] not in scores]
             if not missing:
                 break
@@ -127,57 +143,121 @@ class Screener:
             for i, paper in enumerate(missing, 1):
                 abstract = (paper.get("abstract") or "")[:MAX_ABSTRACT_CHARS]
                 blocks.append(f"Paper {i}\nTitle: {paper['title']}\nAbstract: {abstract or '(none)'}")
-            result = self._call(ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), AbstractScores)
-            if result is None:
-                break
+            purpose = f"{task}, {where}" if attempt == 0 else f"{task}, {where}: retry for {len(missing)} skipped"
+            try:
+                response, result = self._call(purpose, ABSTRACT_SYSTEM_PROMPT, "\n\n".join(blocks), AbstractScores)
+            except Exception:
+                if attempt == 0:
+                    raise
+                break  # keep the first attempt's scores; the failed retry is in the log
+            new = []
             for item in result.papers:
-                if 1 <= item.id <= len(missing):
-                    paper_id = missing[item.id - 1]["id"]
-                    scores[paper_id] = {
-                        "paper_id": paper_id,
+                if 1 <= item.id <= len(missing) and missing[item.id - 1]["id"] not in scores:
+                    paper = missing[item.id - 1]
+                    scores[paper["id"]] = {
+                        "paper_id": paper["id"],
                         "score": float(max(0, min(10, item.score))),
                         "theme": item.theme.strip()[:120],
                         "reason": _clean_reason(item.reason),
                     }
+                    new.append((scores[paper["id"]], paper["title"]))
+            new.sort(key=lambda pair: pair[0]["score"], reverse=True)
+            shown = sum(1 for score, _ in new if score["score"] >= MIN_SCORE)
+            best = f", best {new[0][0]['score']:.0f}" if new else ""
+            activity.annotate(response, summary=f"scored {len(new)} of {len(missing)}: {shown} at {MIN_SCORE}+{best}", detail=[
+                section("Scores", [f"{s['score']:.0f} · {title} · {s['theme']}: {s['reason']}" for s, title in new], open=True, format="list"),
+            ])
+
+        with self._lock:
+            self.skipped += len(batch) - len(scores)
         return list(scores.values())
 
+    def record_skipped(self) -> None:
+        if self.skipped:
+            task = "Scoring under the draft" if self.draft else "Abstract scoring"
+            later = "They show as ? in the test." if self.draft else "They'll be scored on the next refresh."
+            activity.issue("skipped", f"{task}: the model left out {_papers(self.skipped)} twice. {later}", count=self.skipped)
 
-def _run_batches(fn: Callable, items: list, batch_size: int, on_batch: Callable[[int, int], None]) -> list:
-    """Run fn over batches in parallel, reporting (done, total) after each batch.
 
-    A failed batch is skipped (and retried on the next refresh) unless every batch fails.
+def _run_batches(fn: Callable, items: list, batch_size: int, on_batch: Callable[[int, int], None]) -> tuple[list, list]:
+    """Run fn(batch, "batch i of n") over batches in parallel, reporting (done, total) after each batch.
+
+    Returns the combined results and the failed batches as (batch, exception) pairs.
+    Raises only if every batch fails. Papers in a failed batch are retried on the next refresh.
     """
     batches = [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-    results, errors, done = [], [], 0
+    results, failures, done = [], [], 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(fn, batch) for batch in batches]
+        # Each batch runs in a copy of this context, so its log entries land in the current run
+        futures = {
+            pool.submit(contextvars.copy_context().run, fn, batch, f"batch {i} of {len(batches)}"): batch
+            for i, batch in enumerate(batches, 1)
+        }
         for future in as_completed(futures):
             try:
                 results.extend(future.result())
             except Exception as exc:
-                errors.append(exc)
+                failures.append((futures[future], exc))
             done += 1
             on_batch(done, len(batches))
-    if errors and len(errors) == len(batches):
-        raise errors[0]
-    return results
+    if failures and len(failures) == len(batches):
+        raise failures[0][1]
+    return results, failures
+
+
+def _papers(n: int) -> str:
+    return f"{n} paper{'s' if n != 1 else ''}"
+
+
+def _failed_note(failures: list) -> str:
+    return f"; {len(failures)} batch{'es' if len(failures) != 1 else ''} failed" if failures else ""
+
+
+def _record_failures(stage: str, failures: list, total_batches: int) -> None:
+    if failures:
+        papers = sum(len(batch) for batch, _ in failures)
+        activity.issue(
+            "failed_batch",
+            f"{stage}: {len(failures)} of {total_batches} batches failed, so {_papers(papers)} weren't screened "
+            f"({describe_error(failures[0][1])})",
+            count=len(failures),
+        )
 
 
 _refresh_lock = Lock()
 
 
-def refresh(profile: dict[str, Any], emit: Emit, force_fetch: bool = False) -> None:
-    """Fetch new papers if needed, then screen everything not yet screened under this profile."""
+def refresh(profile: dict[str, Any], emit: Emit, force_fetch: bool = False, changed: bool = False) -> dict[str, Any]:
+    """Fetch new papers if needed, then screen everything not yet screened under this profile.
+
+    Returns the feed, plus "issues": problems that didn't stop the refresh, such as failed batches.
+    """
     if not _refresh_lock.acquire(blocking=False):
         raise ValueError("A refresh is already running.")
     try:
-        _fetch_if_stale(profile, emit, force_fetch)
-        _screen(profile, emit)
+        if changed:
+            title = "Re-screen with your new interests"
+        elif force_fetch:
+            title = "Check arXiv and screen new papers"
+        else:
+            title = "Screen today's papers"
+        with activity.run("screener", title, emit, keep_empty=False) as log:
+            fetched = _fetch_if_stale(profile, emit, force_fetch)
+            _screen(profile, emit, fetched)
+            feed = get_feed(profile)
+            if log.events:
+                stats = feed["stats"]
+                log.update(summary=(
+                    f"{stats['fetched']} papers, {stats['passed_titles']} passed the title screen, "
+                    f"{stats['shown']} shown"
+                ))
+        return {"feed": feed, "issues": log.issues}
     finally:
         _refresh_lock.release()
 
 
-def _fetch_if_stale(profile: dict[str, Any], emit: Emit, force: bool) -> None:
+def _fetch_if_stale(profile: dict[str, Any], emit: Emit, force: bool) -> bool:
+    """Fetch papers unless the last fetch is recent. Returns whether it fetched."""
     categories = sorted(profile.get("categories") or [])
     meta = store.get_meta("last_fetch") or {}
     fresh = (
@@ -186,23 +266,28 @@ def _fetch_if_stale(profile: dict[str, Any], emit: Emit, force: bool) -> None:
         and time.time() - meta.get("at", 0) < FETCH_MAX_AGE_SECONDS
     )
     if fresh and not force:
-        return
+        return False
 
     emit({"type": "progress", "stage": "fetch", "text": f"Fetching today's arXiv papers in {', '.join(categories)}"})
-    papers = arxiv.fetch_announced(categories)
+    with activity.span("step", "Fetch today's arXiv announcement (RSS)") as step:
+        papers = arxiv.fetch_announced(categories)
+        step.finish(summary=f"{len(papers)} new papers in {', '.join(categories)}")
     if not papers:
         # No announcement today (weekend or holiday): search the last few days instead
         emit({"type": "progress", "stage": "fetch", "text": "No announcement today. Searching the last few days"})
-        papers = arxiv.fetch_recent(
-            categories,
-            window_start(),
-            on_page=lambda n: emit({"type": "progress", "stage": "fetch", "text": f"Fetched {n} papers"}),
-        )
+        with activity.span("step", f"Search arXiv for the last {config.WINDOW_DAYS} days (no announcement today)") as step:
+            papers = arxiv.fetch_recent(
+                categories,
+                window_start(),
+                on_page=lambda n: emit({"type": "progress", "stage": "fetch", "text": f"Fetched {n} papers"}),
+            )
+            step.finish(summary=f"{len(papers)} papers")
     store.upsert_papers(papers)
     store.set_meta("last_fetch", {"categories": categories, "since": window_start(), "at": time.time(), "count": len(papers)})
+    return True
 
 
-def _screen(profile: dict[str, Any], emit: Emit) -> None:
+def _screen(profile: dict[str, Any], emit: Emit, fetched: bool) -> None:
     key = profile_hash(profile)
     papers = store.get_papers_since(window_start(), profile.get("categories"))
     if not papers:
@@ -213,28 +298,55 @@ def _screen(profile: dict[str, Any], emit: Emit) -> None:
     screener = Screener(profile)
 
     to_screen = [p for p in papers if p["id"] not in cached]
+    unscored = [p for p in papers if cached.get(p["id"], {}).get("passed") and cached[p["id"]]["score"] is None]
+    if to_screen or unscored or fetched:
+        done = len(papers) - len(to_screen) - len(unscored)
+        activity.begin(
+            "step", "Check the screening cache",
+            summary=f"{done} of {len(papers)} papers already screened under these interests",
+        ).finish()
+
     if to_screen:
+        batches = -(-len(to_screen) // TITLE_BATCH_SIZE)
+
         def on_titles(done: int, total: int) -> None:
             emit({
                 "type": "progress", "stage": "titles", "done": done, "total": total,
                 "text": f"Reading {len(to_screen)} titles",
             })
 
-        on_titles(0, -(-len(to_screen) // TITLE_BATCH_SIZE))
-        outcomes = _run_batches(screener.screen_titles, to_screen, TITLE_BATCH_SIZE, on_titles)
+        on_titles(0, batches)
+        with activity.span("group", "Pass 1: title screen") as group:
+            outcomes, failures = _run_batches(screener.screen_titles, to_screen, TITLE_BATCH_SIZE, on_titles)
+            kept = sum(1 for _, passed in outcomes if passed)
+            group.finish(
+                "error" if failures else "ok",
+                summary=f"read {len(outcomes)} titles, kept {kept}" + _failed_note(failures),
+            )
+        _record_failures("Title screen", failures, batches)
         store.save_title_screen(outcomes, key)
         cached = store.get_screening([p["id"] for p in papers], key)
 
     to_score = [p for p in papers if cached.get(p["id"], {}).get("passed") and cached[p["id"]]["score"] is None]
     if to_score:
+        batches = -(-len(to_score) // ABSTRACT_BATCH_SIZE)
+
         def on_scores(done: int, total: int) -> None:
             emit({
                 "type": "progress", "stage": "abstracts", "done": done, "total": total,
                 "text": f"Scoring {len(to_score)} abstracts",
             })
 
-        on_scores(0, -(-len(to_score) // ABSTRACT_BATCH_SIZE))
-        scores = _run_batches(screener.score_abstracts, to_score, ABSTRACT_BATCH_SIZE, on_scores)
+        on_scores(0, batches)
+        with activity.span("group", "Pass 2: abstract scoring") as group:
+            scores, failures = _run_batches(screener.score_abstracts, to_score, ABSTRACT_BATCH_SIZE, on_scores)
+            shown = sum(1 for s in scores if s["score"] >= MIN_SCORE)
+            group.finish(
+                "error" if failures else "ok",
+                summary=f"scored {len(scores)} abstracts, {shown} at {MIN_SCORE}+" + _failed_note(failures),
+            )
+        _record_failures("Abstract scoring", failures, batches)
+        screener.record_skipped()
         store.save_scores(scores, key)
 
 
@@ -267,14 +379,38 @@ def get_feed(profile: dict[str, Any]) -> dict[str, Any]:
             "passed_titles": sum(1 for r in cached.values() if r["passed"]),
             "shown": sum(1 for p in items if p["score"] >= MIN_SCORE),
             "unscreened": len(papers) - len(cached),
+            "unscored": sum(1 for r in cached.values() if r["passed"] and r["score"] is None),
         },
         "min_score": MIN_SCORE,
         "since": window_start(),
     }
 
 
+def get_report(profile: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Every paper in the window by what the screener did with it: shown, scored low, dropped by title, or pending."""
+    key = profile_hash(profile)
+    papers = store.get_papers_since(window_start(), profile.get("categories"))
+    cached = store.get_screening([p["id"] for p in papers], key)
+    report: dict[str, list[dict[str, Any]]] = {"shown": [], "low": [], "title": [], "pending": []}
+    for paper in papers:
+        result = cached.get(paper["id"])
+        item = {"id": paper["id"], "title": paper["title"], "url": paper["url"], "score": None, "theme": None, "reason": None}
+        if result is None or (result["passed"] and result["score"] is None):
+            report["pending"].append(item)
+        elif not result["passed"]:
+            report["title"].append(item)
+        else:
+            item.update(score=result["score"], theme=result["theme"], reason=result["reason"])
+            report["shown" if result["score"] >= MIN_SCORE else "low"].append(item)
+    for group in ("shown", "low"):
+        report[group].sort(key=lambda p: p["score"], reverse=True)
+    return report
+
+
 def rescore(profile: dict[str, Any], papers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Score papers under a (possibly unsaved) profile without caching. Used to test edits."""
-    screener = Screener(profile)
-    results = _run_batches(screener.score_abstracts, papers, ABSTRACT_BATCH_SIZE, lambda done, total: None)
+    screener = Screener(profile, draft=True)
+    results, failures = _run_batches(screener.score_abstracts, papers, ABSTRACT_BATCH_SIZE, lambda done, total: None)
+    _record_failures("Scoring under the draft", failures, -(-len(papers) // ABSTRACT_BATCH_SIZE))
+    screener.record_skipped()
     return {r["paper_id"]: r for r in results}

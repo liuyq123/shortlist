@@ -20,8 +20,9 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 
-from paperfind_llm import arxiv, config, store
-from paperfind_llm.claude import fallback_params, get_client, session_usage
+from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm.activity import section
+from paperfind_llm.claude import call, fallback_params
 
 MAX_LIBRARY_PAPERS = 800
 PROMPT_VERSION = "1"  # part of the screening cache key; bump when screening prompts change
@@ -140,48 +141,57 @@ def build_profile(
     """Build and save a profile from a description and/or papers. Emits progress events."""
     description = (description or "").strip() or None
     papers, ids = parse_papers(papers_text) if papers_text.strip() else ([], [])
-    if ids:
-        emit({"type": "step", "text": f"Looking up {len(ids)} arXiv paper{'s' if len(ids) != 1 else ''}"})
-        found = arxiv.fetch_by_ids(ids)
-        papers += [{"title": p["title"], "abstract": p["abstract"]} for p in found]
-        if len(found) < len(ids):
-            emit({"type": "step", "text": f"Couldn't look up {len(ids) - len(found)} of them; continuing without"})
-    if not description and not papers:
-        raise ValueError("Describe your research or add a few papers you like.")
+    given = description or f"{len(papers) + len(ids)} papers"
+    with activity.run("builder", "Build your interest profile", emit, input=given) as log:
+        if ids:
+            emit({"type": "step", "text": f"Looking up {len(ids)} arXiv paper{'s' if len(ids) != 1 else ''}"})
+            with activity.span("step", f"Look up {len(ids)} arXiv paper{'s' if len(ids) != 1 else ''}") as step:
+                found = arxiv.fetch_by_ids(ids)
+                step.finish(summary=f"found {len(found)} of {len(ids)}")
+            papers += [{"title": p["title"], "abstract": p["abstract"]} for p in found]
+            if len(found) < len(ids):
+                missing = len(ids) - len(found)
+                emit({"type": "step", "text": f"Couldn't look up {missing} of them; continuing without"})
+                activity.issue("lookup_failed", f"Couldn't look up {missing} of {len(ids)} arXiv papers; built the profile without them.", count=missing)
+        if not description and not papers:
+            raise ValueError("Describe your research or add a few papers you like.")
 
-    if papers:
-        emit({"type": "step", "text": f"Reading {min(len(papers), MAX_LIBRARY_PAPERS)} papers"})
-    emit({"type": "step", "text": "Claude is writing your interest profile"})
+        if papers:
+            emit({"type": "step", "text": f"Reading {min(len(papers), MAX_LIBRARY_PAPERS)} papers"})
+        emit({"type": "step", "text": "Claude is writing your interest profile"})
 
-    model = config.AGENT_MODEL
-    response = get_client().beta.messages.parse(
-        model=model,
-        max_tokens=16000,
-        system=BUILD_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _build_prompt(description, papers)}],
-        output_format=BuiltProfile,
-        output_config={"effort": "medium"},
-        **fallback_params(model),
-    )
-    session_usage.add(response.usage, model)
+        model = config.AGENT_MODEL
+        response = call(
+            "Build profile",
+            model=model,
+            max_tokens=16000,
+            system=BUILD_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": _build_prompt(description, papers)}],
+            output_format=BuiltProfile,
+            output_config={"effort": "medium"},
+            **fallback_params(model),
+        )
+        if response.stop_reason == "refusal":
+            raise ValueError("Claude declined to build this profile. Try rewording your description.")
+        built = response.parsed_output
+        if built is None or not built.themes:
+            raise ValueError(f"Could not build a profile (stop reason: {response.stop_reason}). Try again.")
 
-    if response.stop_reason == "refusal":
-        raise ValueError("Claude declined to build this profile. Try rewording your description.")
-    built = response.parsed_output
-    if built is None or not built.themes:
-        raise ValueError(f"Could not build a profile (stop reason: {response.stop_reason}). Try again.")
-
-    categories = [c for c in built.arxiv_categories if c in arxiv.CATEGORIES] or ["cs.LG"]
-    return store.save_profile({
-        "description": description,
-        "themes": [
-            {"id": store.new_theme_id(), "name": t.name, "description": t.description, "examples": t.example_titles[:3]}
-            for t in built.themes
-        ],
-        "not_interested": built.not_interested,
-        "categories": categories[:8],
-        "source": "built",
-    })
+        categories = [c for c in built.arxiv_categories if c in arxiv.CATEGORIES] or ["cs.LG"]
+        activity.annotate(response, summary=f"{len(built.themes)} themes, {len(built.not_interested)} exclusions", detail=[
+            section("Profile", built.model_dump(), open=True, format="code"),
+        ])
+        log.update(summary=f"{len(built.themes)} themes; categories {', '.join(categories[:8])}")
+        return store.save_profile({
+            "description": description,
+            "themes": [
+                {"id": store.new_theme_id(), "name": t.name, "description": t.description, "examples": t.example_titles[:3]}
+                for t in built.themes
+            ],
+            "not_interested": built.not_interested,
+            "categories": categories[:8],
+            "source": "built",
+        })
 
 
 def load_personas() -> dict[str, dict[str, Any]]:

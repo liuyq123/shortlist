@@ -28,8 +28,12 @@ Then either describe your research (optionally with a few paper titles, arXiv li
    - revise if the test shows collateral damage, then propose the change.
 4. **Apply** the proposal. The feed is re-screened and every card shows how its score moved (↑2, ↓5, *New in your feed*).
 5. Vote 👍/👎 on a few papers and click **Learn from my votes**, or ask **Why is #1 ranked first?**
+6. Open the **Agent log** (top bar) to watch every model request and tool call as it happens. Each request shows what it was for (*Title screen, batch 2 of 3*, *Assistant turn 4*), the model, latency, tokens (including cached), cost, why it stopped, and retries. Click a row for the full prompt and the raw reply. Tool calls show their arguments, result, and duration, nested under the model turn that asked for them.
+7. Click **Show what was filtered** above the feed to see every paper the screener dropped: titles cut at pass 1, and abstracts scored below 4 with the screener's reason. **I'd want this** turns a miss into feedback for the assistant.
 
 You can also edit themes, exclusions, and categories directly in the left panel.
+
+Nothing fails silently: a failed batch, a refused request, or papers the model skipped twice are listed as problems on the run in the log, and the feed says how many papers weren't screened, with a Retry button.
 
 ## How it works
 
@@ -54,6 +58,7 @@ Assistant                 Claude Opus 5.5 with 12 tools: inspect feed/votes/pape
 - **Two-pass screening** makes an LLM-only design cheap. The title pass is generous (about 30% survive) and costs a fraction of a cent. Only the survivors get their abstracts read. A day of ~550 papers costs **about 2¢** and takes about 25 seconds.
 - **The assistant is an agent, not a single prompt.** It decides what to look at, forms a hypothesis about what in the profile caused the problem, makes an edit, and checks it with `test_draft` before proposing it. Nothing is saved until you click Apply.
 - **Costs are visible.** The header shows what this session has spent. A typical assistant conversation costs 10–15¢.
+- **One wrapper for every model request** (`claude.call`). It does the retries itself, so they show up in the log, and it records the prompt, the raw reply, tokens, and cost. It is also the one place to change to use another model provider.
 
 ## Configuration
 
@@ -72,12 +77,13 @@ Set these in `.env` (working directory or `~/.paperfind-llm/.env`):
 ```
 paperfind_llm/
   app.py          FastAPI server; long operations stream progress as NDJSON
-  screen.py       two-pass screening, caching, and the ranked feed
+  activity.py     the agent log: runs, model requests, tool calls, problems
+  screen.py       two-pass screening, caching, the ranked feed, and what was filtered
   assistant.py    the feedback agent: tools, draft profile, test_draft, proposals
   profile.py      building the interest profile; parsing BibTeX/RIS/arXiv links; personas
   arxiv.py        arXiv RSS feed, search API fallback, paper lookups
   store.py        SQLite storage and profile.json
-  claude.py       Claude client, refusal fallback, cost tracking
+  claude.py       the wrapper every model request goes through: retries, logging, cost
   static/         the single-page UI (plain HTML/CSS/JS, no build step)
 ```
 
@@ -86,3 +92,4 @@ paperfind_llm/
 - arXiv only. The RSS feed has one announcement a day, so the feed builds up over the days you use it. On weekends it falls back to arXiv's search API, which is rate-limited.
 - LLM scores vary a little between runs, so papers near the cutoff (scores 4–5) can move in or out when the feed is re-screened.
 - `test_draft` re-runs only the abstract pass. A draft that changes the title pass is checked when you apply it.
+- The agent log is kept in memory for the last 30 runs and is cleared when the server restarts.

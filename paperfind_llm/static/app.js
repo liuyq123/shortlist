@@ -26,7 +26,26 @@ const state = {
   flash: new Set(),       // theme ids to highlight after a change
   colors: new Map(),      // theme id -> color
   tab: "feed",
-  build: null,            // {steps, error} while building a profile
+  build: null,            // {steps, error, runId} while building a profile
+  view: "feed",           // "feed" or "log"
+  refreshRunId: null,     // agent-log run of the latest feed refresh
+  refreshIssues: [],      // problems the latest refresh reported (failed batches, skipped papers)
+  report: null,           // {tab, data} while "what was filtered" is open
+  log: {
+    runs: new Map(),      // run id -> run, from /api/log
+    version: 0,
+    usage: null,
+    selected: null,       // run id shown on the right
+    follow: true,         // keep selecting the newest run
+    listOnly: false,      // on phones: show the run list instead of the selected run
+    agent: "",            // filter: "" for all
+    open: new Set(),      // event ids with details open
+    collapsed: new Set(), // group event ids with children hidden
+    details: new Map(),   // event id -> sections
+    fetching: new Set(),
+    sections: new Map(),  // "eventId:index" -> open, for sections the user toggled
+    timer: null,
+  },
 };
 
 const ICON_UP = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></svg>`;
@@ -93,7 +112,7 @@ const jsonBody = (body) => ({ headers: { "Content-Type": "application/json" }, b
 // ============================================================================
 
 function setCost(usd) {
-  $("#cost").textContent = `$${usd.toFixed(3)} spent`;
+  $("#cost").innerHTML = `$${usd.toFixed(3)}<span class="pill-suffix"> spent</span>`;
 }
 
 let toastTimer = null;
@@ -119,6 +138,42 @@ function shortAuthors(authors) {
 function shortTitle(title, max = 70) {
   return title.length > max ? `${title.slice(0, max - 1)}…` : title;
 }
+
+// "claude-haiku-5-5" -> "Haiku 5.5"; other model ids are shown as they are
+function modelName(id) {
+  const match = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id || "");
+  if (!match) return id || "";
+  return `${match[1][0].toUpperCase()}${match[1].slice(1)} ${match[2]}${match[3] ? `.${match[3]}` : ""}`;
+}
+
+function fmtTokens(n) {
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${(n / 1000).toFixed(n < 1e4 ? 1 : 0)}K`;
+  return `${(n / 1e6).toFixed(2)}M`;
+}
+
+function fmtCost(usd) {
+  if (!usd) return "$0";
+  return `$${usd.toFixed(usd >= 0.1 ? 2 : usd >= 0.01 ? 3 : 4)}`;
+}
+
+function fmtDur(seconds) {
+  if (seconds < 1) return `${Math.max(0, Math.round(seconds * 1000))} ms`;
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+}
+
+function fmtAgo(epoch) {
+  const seconds = Date.now() / 1000 - epoch;
+  if (seconds < 45) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  return new Date(epoch * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+
+// Input tokens including the cached part (the API reports cached tokens separately)
+const tokensIn = (u) => u.input_tokens + u.cache_read_tokens + (u.cache_write_tokens || 0);
 
 function setProfile(profile) {
   const old = state.profile;
@@ -173,6 +228,7 @@ function snapshotScores() {
 
 function render() {
   $("#reset-btn").hidden = !state.profile;
+  updateNav();
   if (!state.ready) return;
   if (!state.hasKey) return renderKey();
   if (!state.profile) return renderOnboarding();
@@ -240,6 +296,7 @@ function renderOnboarding() {
           <button class="btn primary" data-action="build" ${building ? "disabled" : ""}>Build my feed →</button>
         </div>
         ${steps ? `<ul class="steps build-steps">${steps}</ul>` : ""}
+        ${state.build?.runId ? logLink(state.build.runId, "Watch it in the agent log") : ""}
         ${state.build?.error ? `<div class="banner error" style="margin-top:12px">${esc(state.build.error)}</div>` : ""}
       </div>
       <div class="divider">or try a sample researcher</div>
@@ -422,15 +479,19 @@ function renderFeed() {
   if (refreshing) html += progressBox(refreshing);
   if (state.refreshError && !refreshing) {
     html += `<div class="banner error">${esc(state.refreshError)}<div class="spacer"></div>
+      ${state.refreshRunId ? logLink(state.refreshRunId, "See the log", "btn small") : ""}
       <button class="btn small" data-action="rescreen">Try again</button></div>`;
   }
+  if (feed && !refreshing && !state.refreshError) html += problemsBanner(feed.stats);
   if (state.feedStale && !refreshing) {
     html += `<div class="banner">Your interests changed. Re-screen today's papers to see the effect.
       <span class="muted small">About 30 s and 2¢.</span><div class="spacer"></div>
       <button class="btn small primary" data-action="rescreen">Re-screen</button></div>`;
   }
 
-  if (feed) {
+  if (feed && state.report) {
+    html += reportView();
+  } else if (feed) {
     html += pipeline(feed.stats);
     const papers = visiblePapers();
     html += filterBar(papers);
@@ -457,17 +518,35 @@ function progressBox(event) {
       <div class="progress-text"><span><b>${label}</b> · ${esc(event.text || "")}</span>
         <span class="muted">${determinate ? `${event.done}/${event.total} batches` : ""}</span></div>
       <div class="bar ${determinate ? "" : "indeterminate"}"><div style="width:${determinate ? pct : 35}%"></div></div>
+      ${state.refreshRunId ? logLink(state.refreshRunId, "Watch each request in the agent log") : ""}
     </div>`;
 }
 
 function pipeline(stats) {
   if (!stats.fetched) return "";
-  const pending = stats.unscreened ? ` <span class="muted">(${stats.unscreened} not screened yet)</span>` : "";
   return `
     <div class="pipeline" title="Pass 1 reads titles generously; pass 2 reads abstracts and scores 0–10. Papers scoring 4+ are shown.">
       <b>${stats.fetched}</b> new papers <span class="arrow">→</span>
       <b>${stats.passed_titles}</b> passed the title screen <span class="arrow">→</span>
-      <b>${stats.shown}</b> worth a look${pending}
+      <b>${stats.shown}</b> worth a look
+      <button class="link-btn inline" data-action="open-report">Show what was filtered</button>
+    </div>`;
+}
+
+// Failed batches and papers left unscreened, so nothing fails silently
+function problemsBanner(stats) {
+  const pending = stats.unscreened + (stats.unscored || 0);
+  const failed = state.refreshIssues.filter((i) => i.kind === "failed_batch").reduce((n, i) => n + i.count, 0);
+  if (!pending && !failed) return "";
+  const parts = [];
+  if (failed) parts.push(`${plural(failed, "batch", "batches")} failed`);
+  if (pending) parts.push(`${plural(pending, "paper")} ${pending === 1 ? "wasn't" : "weren't"} screened`);
+  const text = parts.join(", ");
+  return `
+    <div class="banner warn"><span><b>${text[0].toUpperCase()}${text.slice(1)}.</b> They'll be screened when you retry.</span>
+      <div class="spacer"></div>
+      ${state.refreshRunId ? logLink(state.refreshRunId, "See the log", "btn small") : ""}
+      <button class="btn small primary" data-action="rescreen">Retry</button>
     </div>`;
 }
 
@@ -541,16 +620,25 @@ async function refreshFeed({ force = false, afterChange = false } = {}) {
   if (state.refresh) return;
   state.refresh = { stage: "start", text: "Checking for new papers" };
   state.refreshError = null;
+  state.refreshRunId = null;
+  const changed = afterChange || state.feedStale;
   if (!afterChange && !state.feedStale) state.prevScores = null;
   renderFeed();
+  updateNav();
   try {
-    const final = await streamEvents("/api/feed/refresh", jsonBody({ force }), (event) => {
+    const final = await streamEvents("/api/feed/refresh", jsonBody({ force, changed }), (event) => {
+      if (event.type === "run") {
+        state.refreshRunId = event.run_id;
+        pollLogSoon();
+      }
       if (event.type === "progress") {
         state.refresh = event;
         renderFeed();
       }
     });
     state.feed = final.feed;
+    state.refreshIssues = final.issues || [];
+    if (state.report) loadReport();
     const wasStale = state.feedStale;
     state.feedStale = false;
     if ((afterChange || wasStale) && state.prevShown) summarizeMovement();
@@ -560,6 +648,7 @@ async function refreshFeed({ force = false, afterChange = false } = {}) {
   state.refresh = null;
   renderFeed();
   renderAssistant();
+  updateNav();
 }
 
 function summarizeMovement() {
@@ -632,6 +721,7 @@ function botMessage(message, index) {
   return `
     <div class="msg-bot">
       ${steps.length ? `<ul class="steps">${steps.join("")}</ul>` : ""}
+      ${message.runId ? logLink(message.runId, message.running ? "Watch it in the agent log" : "Every request and tool call") : ""}
       ${message.tests ? testsTable(message.tests) : ""}
       ${message.reply ? `<div class="reply">${esc(message.reply)}</div>` : ""}
       ${message.error ? `<div class="msg-error">${esc(message.error)}</div>` : ""}
@@ -696,8 +786,13 @@ async function ask(text) {
   state.chat.push(message);
   state.busy = true;
   renderAssistant();
+  updateNav();
   try {
     const final = await streamEvents("/api/assistant", jsonBody({ message: text }), (event) => {
+      if (event.type === "run") {
+        message.runId = event.run_id;
+        pollLogSoon();
+      }
       if (event.type === "step") message.steps.push(event.text);
       if (event.type === "test") message.tests = event.results;
       renderAssistant();
@@ -710,6 +805,7 @@ async function ask(text) {
   message.running = false;
   state.busy = false;
   renderAssistant();
+  updateNav();
 }
 
 async function applyProposal(index) {
@@ -737,6 +833,444 @@ async function discardProposal(index) {
 }
 
 // ============================================================================
+// What the screener filtered
+// ============================================================================
+
+const REPORT_TABS = {
+  title: {
+    label: "Dropped by title",
+    note: "Pass 1 read only these titles and judged them unrelated to your interests. It returns just the titles it keeps, so there is no reason for each one.",
+  },
+  low: {
+    label: "Scored below 4",
+    note: "Pass 2 read these abstracts and scored them 0–3, so they're hidden from your feed. The reasons are the screener's.",
+  },
+  shown: { label: "Shown", note: "Scored 4 or more. These are the papers in your feed." },
+  pending: {
+    label: "Not screened",
+    note: "Not screened yet because a batch failed or the model skipped them. Retry to screen them.",
+  },
+};
+
+async function openReport() {
+  state.report = { tab: "title", data: null };
+  renderFeed();
+  await loadReport();
+}
+
+async function loadReport() {
+  try {
+    const data = await api("/api/feed/report");
+    if (!state.report) return;
+    state.report.data = data;
+  } catch (err) {
+    toast(err.message);
+    state.report = null;
+  }
+  renderFeed();
+}
+
+function reportView() {
+  const report = state.report;
+  const head = `
+    <div class="report-head">
+      <button class="btn small" data-action="close-report">← Back to feed</button>
+      <h3>What the screener filtered</h3>
+    </div>`;
+  if (!report.data) return `<div class="report">${head}<div class="empty">Loading…</div></div>`;
+  const data = report.data;
+  const tabs = Object.entries(REPORT_TABS).filter(([key]) => key !== "pending" || data.pending.length);
+  const rows = data[report.tab].map((paper) => {
+    const theme = themeFor(paper.theme);
+    const themeName = paper.theme && paper.theme.toLowerCase() !== "none" ? paper.theme : "";
+    const score = paper.score === null ? "–" : Math.round(paper.score);
+    const scoreClass = paper.score >= 9 ? "s9" : paper.score >= 7 ? "s7" : "";
+    const why = paper.reason ? `
+      <div class="report-reason">
+        ${theme ? `<span class="theme-tag" style="--c:${colorFor(theme)}">${esc(theme.name)}</span>` : themeName ? `<span class="theme-tag">${esc(themeName)}</span>` : ""}
+        ${esc(paper.reason)}
+      </div>` : "";
+    const want = report.tab === "title" || report.tab === "low"
+      ? `<button class="icon-btn" data-action="want-this" data-id="${esc(paper.id)}" title="Tell the assistant this should be in your feed">I'd want this</button>`
+      : "";
+    return `
+      <li class="report-row">
+        <span class="score mini ${scoreClass}">${score}</span>
+        <div class="report-main"><a href="${esc(paper.url)}" target="_blank" rel="noopener">${esc(paper.title)}</a>${why}</div>
+        ${want}
+      </li>`;
+  }).join("");
+  return `
+    <div class="report">
+      ${head}
+      <div class="report-tabs">
+        ${tabs.map(([key, tab]) => `
+          <button class="filter ${report.tab === key ? "active" : ""}" data-action="report-tab" data-tab="${key}">
+            ${tab.label} <span class="count">${data[key].length}</span></button>`).join("")}
+      </div>
+      <p class="report-note">${REPORT_TABS[report.tab].note}</p>
+      ${rows ? `<ol class="report-list">${rows}</ol>` : `<div class="empty">None.</div>`}
+    </div>`;
+}
+
+function wantThis(paperId) {
+  const list = [...state.report.data.title, ...state.report.data.low];
+  const paper = list.find((p) => p.id === paperId);
+  if (!paper) return;
+  const title = shortTitle(paper.title, 90);
+  const text = paper.score === null
+    ? `The title screen dropped “${title}”, but I'd want papers like it because `
+    : `“${title}” only scored ${Math.round(paper.score)}, but I'd want papers like it because `;
+  if (window.matchMedia("(max-width: 820px)").matches) setTab("assistant");
+  const input = $("#composer-input");
+  input.value = text;
+  autosize(input);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+// ============================================================================
+// Agent log
+// ============================================================================
+
+const AGENTS = {
+  screener: "Screener",
+  assistant: "Assistant",
+  builder: "Profile builder",
+};
+
+function logLink(runId, text, cls = "link-btn log-link") {
+  return `<button class="${cls}" data-action="open-log" data-run="${runId}">${esc(text)} →</button>`;
+}
+
+function updateNav() {
+  const nav = $("#views");
+  nav.hidden = !(state.ready && state.hasKey);
+  for (const button of nav.querySelectorAll("button")) {
+    button.classList.toggle("active", button.dataset.view === state.view);
+  }
+  const working = Boolean(state.refresh || state.busy || (state.build && !state.build.error));
+  $("#live-dot").hidden = !working;
+}
+
+function setView(view, runId = null) {
+  state.view = view;
+  $("#app").hidden = view !== "feed";
+  $("#log-view").hidden = view !== "log";
+  if (view === "log") {
+    // A link opens its own run; the top bar follows whatever ran most recently
+    state.log.follow = !runId;
+    state.log.listOnly = false;
+    if (runId) {
+      state.log.selected = runId;
+      state.log.agent = "";
+    } else {
+      const latest = sortedRuns().find((run) => run.status === "running") || sortedRuns()[0];
+      if (latest) state.log.selected = latest.id;
+    }
+    renderLog();
+    pollLog();
+  } else {
+    clearTimeout(state.log.timer);
+  }
+  updateNav();
+  window.scrollTo(0, 0);
+}
+
+async function pollLog() {
+  clearTimeout(state.log.timer);
+  if (state.view !== "log") return;
+  try {
+    mergeLog(await api(`/api/log?since=${state.log.version}`));
+  } catch {
+    // the server may be restarting; try again on the next tick
+  }
+  const running = [...state.log.runs.values()].some((run) => run.status === "running");
+  state.log.timer = setTimeout(pollLog, running ? 700 : 2500);
+}
+
+// A run just started somewhere in the app; show it without waiting for the next poll
+function pollLogSoon() {
+  if (state.view === "log") setTimeout(pollLog, 150);
+}
+
+function mergeLog(data) {
+  const log = state.log;
+  const kept = new Set(data.ids);
+  let changed = data.runs.length > 0 || !log.usage;
+  for (const id of [...log.runs.keys()]) {
+    if (!kept.has(id)) {
+      log.runs.delete(id);
+      changed = true;
+    }
+  }
+  for (const run of data.runs) log.runs.set(run.id, run);
+  log.version = data.version;
+  log.usage = data.usage;
+  if (log.follow) {
+    const runs = sortedRuns();
+    const next = (runs.find((run) => run.status === "running") || runs[0])?.id ?? null;
+    if (next !== log.selected) {
+      log.selected = next;
+      changed = true;
+    }
+  }
+  if (!log.runs.has(log.selected)) log.selected = null;
+  if (changed) renderLog();
+  else tickLog();
+}
+
+const sortedRuns = () => [...state.log.runs.values()].sort((a, b) => b.id - a.id);
+
+function renderLog() {
+  const el = $("#log-view");
+  if (state.view !== "log") return;
+  if (!$("#log-body")) {
+    el.innerHTML = `
+      <div class="log">
+        <div class="log-head">
+          <div>
+            <h2>Agent log</h2>
+            <p>Every model request and tool call the agents make, as it happens. Click a row for the full prompt and the raw reply.</p>
+          </div>
+          <div class="log-totals" id="log-totals"></div>
+        </div>
+        <div class="log-body" id="log-body">
+          <aside class="log-side">
+            <div class="log-filters" id="log-filters"></div>
+            <div class="log-runs" id="log-runs"></div>
+          </aside>
+          <section class="log-detail" id="log-detail"></section>
+        </div>
+      </div>`;
+  }
+  $("#log-body").dataset.show = state.log.selected && !state.log.listOnly ? "detail" : "list";
+  renderLogTotals();
+  renderRunList();
+  renderRunDetail();
+}
+
+function renderLogTotals() {
+  const usage = state.log.usage;
+  if (!usage) return;
+  $("#log-totals").innerHTML = `
+    <div><b>${usage.requests}</b><span>model requests</span></div>
+    <div><b>${fmtTokens(tokensIn(usage))}</b><span>tokens in<span class="cached"> (${fmtTokens(usage.cache_read_tokens)} cached)</span></span></div>
+    <div><b>${fmtTokens(usage.output_tokens)}</b><span>tokens out</span></div>
+    <div><b>${fmtCost(usage.cost_usd)}</b><span>this session</span></div>`;
+}
+
+function renderRunList() {
+  const runs = sortedRuns();
+  const counts = { "": runs.length };
+  for (const run of runs) counts[run.agent] = (counts[run.agent] || 0) + 1;
+  $("#log-filters").innerHTML = [["", "All"], ...Object.entries(AGENTS)].map(([key, name]) => `
+    <button class="filter ${state.log.agent === key ? "active" : ""}" data-action="log-filter" data-agent="${key}">
+      ${key ? `<span class="agent-dot agent-${key}"></span>` : ""}${name} <span class="count">${counts[key] || 0}</span></button>`).join("");
+
+  const shown = runs.filter((run) => !state.log.agent || run.agent === state.log.agent);
+  $("#log-runs").innerHTML = shown.length ? shown.map(runItem).join("") : `
+    <div class="log-empty">Nothing yet. Screen papers or ask the assistant something, and each step the agents take appears here.</div>`;
+}
+
+function runItem(run) {
+  const problems = run.issues.length + (run.status === "error" ? 1 : 0);
+  let status = "";
+  if (run.status === "running") status = `<span class="spinner" title="Running"></span>`;
+  else if (run.status === "error") status = `<span class="run-flag error" title="${esc(run.error)}">Failed</span>`;
+  else if (problems) status = `<span class="run-flag warn">${plural(problems, "problem")}</span>`;
+  const running = run.status === "running";
+  return `
+    <button class="run-item ${run.id === state.log.selected ? "active" : ""}" data-action="select-run" data-id="${run.id}">
+      <span class="run-top"><span class="agent-dot agent-${run.agent}"></span>${AGENTS[run.agent] || run.agent}
+        <span class="run-when">${fmtAgo(run.started_at)}</span>${status}</span>
+      <span class="run-title">${esc(run.title)}</span>
+      <span class="run-sub"><span ${running ? `data-since="${run.started_at}"` : ""}>${fmtDur(run.duration)}</span>
+        · ${run.totals.requests ? `${plural(run.totals.requests, "request")} · ${fmtCost(run.totals.cost_usd)}` : "no model requests"}</span>
+    </button>`;
+}
+
+function renderRunDetail() {
+  const el = $("#log-detail");
+  const run = state.log.runs.get(state.log.selected);
+  if (!run) {
+    el.innerHTML = `<div class="log-empty">Pick a run on the left to see what the agent did.</div>`;
+    return;
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  const keepScroll = el.scrollTop;
+  const sameRun = el.dataset.run === String(run.id);
+  const t = run.totals;
+  const statusText = { running: "Running", done: "Done", error: "Failed" }[run.status];
+  const issues = run.issues.length ? `
+    <div class="issues">
+      <b>${plural(run.issues.length, "problem")}</b>
+      <ul>${run.issues.map((i) => `<li>${esc(i.text)}</li>`).join("")}</ul>
+    </div>` : "";
+  const showInput = run.input && run.input !== run.title && run.agent !== "screener";
+
+  el.dataset.run = run.id;
+  el.innerHTML = `
+    <button class="link-btn log-back" data-action="log-back">← All runs</button>
+    <div class="run-head">
+      <div class="run-kicker"><span class="agent-dot agent-${run.agent}"></span>${AGENTS[run.agent] || run.agent}
+        ${run.models.length ? `· ${run.models.map(modelName).join(", ")}` : ""}
+        · ${new Date(run.started_at * 1000).toLocaleTimeString()}</div>
+      <h3>${esc(run.title)}</h3>
+      ${showInput ? `<blockquote>${esc(run.input)}</blockquote>` : ""}
+      <div class="run-stats">
+        <span class="status-${run.status}">${run.status === "running" ? `<span class="spinner"></span>` : ""}${statusText}</span>
+        <span ${run.status === "running" ? `data-since="${run.started_at}"` : ""}>${fmtDur(run.duration)}</span>
+        ${t.requests ? `
+          <span>${plural(t.requests, "model request")}</span>
+          <span>${fmtTokens(tokensIn(t))} tokens in (${fmtTokens(t.cache_read_tokens)} cached)</span>
+          <span>${fmtTokens(t.output_tokens)} out</span>
+          <span>${fmtCost(t.cost_usd)}</span>` : `<span>No model requests</span>`}
+      </div>
+      ${run.summary ? `<div class="run-summary">${esc(run.summary)}</div>` : ""}
+      ${run.error ? `<div class="banner error">${esc(run.error)}</div>` : ""}
+      ${issues}
+    </div>
+    ${timeline(run)}
+    ${run.output ? `<div class="run-output"><div class="run-output-label">Reply</div>${esc(run.output)}</div>` : ""}`;
+
+  if (!sameRun) el.scrollTop = 0;
+  else if (run.status === "running" && atBottom) el.scrollTop = el.scrollHeight;
+  else el.scrollTop = keepScroll;
+  fetchOpenDetails(run);
+}
+
+function timeline(run) {
+  if (!run.events.length) return `<div class="log-empty">${run.status === "running" ? "Starting…" : "No steps were recorded."}</div>`;
+  const total = Math.max(run.duration, 0.001);
+  const children = new Map();
+  for (const event of run.events) {
+    const key = event.parent ?? 0;
+    if (!children.has(key)) children.set(key, []);
+    children.get(key).push(event);
+  }
+  const rows = [];
+  const walk = (parentId, depth) => {
+    for (const event of (children.get(parentId) || []).sort((a, b) => a.t0 - b.t0 || a.id - b.id)) {
+      rows.push(eventRow(event, depth, total, run, children.has(event.id)));
+      if (!state.log.collapsed.has(event.id)) walk(event.id, depth + 1);
+    }
+  };
+  walk(0, 0);
+  return `
+    <div class="timeline">
+      <div class="tl-head"><span>Start</span><span>Step</span><span class="tl-dur">Time</span>
+        <span class="tl-axis"><span>0</span><span>${fmtDur(total)}</span></span></div>
+      ${rows.join("")}
+    </div>`;
+}
+
+const KIND_TAGS = { llm: "LLM", tool: "TOOL", step: "STEP" };
+
+function eventRow(event, depth, total, run, hasChildren) {
+  const end = event.t1 ?? run.duration;
+  const left = Math.min(99.4, (event.t0 / total) * 100);
+  const width = Math.max(0.6, ((end - event.t0) / total) * 100);
+  const running = event.status === "running";
+  const open = state.log.open.has(event.id);
+  const lines = eventLines(event);
+  const statusMark = running ? `<span class="spinner"></span>`
+    : event.status === "error" ? `<span class="ev-status error">failed</span>`
+    : event.status === "refused" ? `<span class="ev-status warn">refused</span>` : "";
+  const clickable = event.kind === "group" ? hasChildren : event.has_detail || event.kind === "llm";
+  const action = event.kind === "group" ? "toggle-group" : "toggle-event";
+  const caret = event.kind === "group" && hasChildren
+    ? `<span class="caret">${state.log.collapsed.has(event.id) ? "▸" : "▾"}</span>`
+    : event.kind !== "group" && clickable ? `<span class="caret">${open ? "▾" : "▸"}</span>` : "";
+  const startEpoch = run.started_at + event.t0;
+
+  return `
+    <div class="ev ev-${event.kind} ${event.status} ${open ? "open" : ""}" style="--depth:${depth}">
+      <div class="ev-row ${clickable ? "clickable" : ""}" ${clickable ? `data-action="${action}" data-id="${event.id}"` : ""}>
+        <span class="ev-time">+${event.t0.toFixed(1)}s</span>
+        <span class="ev-main">
+          <span class="ev-line1">${caret}${KIND_TAGS[event.kind] ? `<span class="kind kind-${event.kind}">${KIND_TAGS[event.kind]}</span>` : ""}${lines.title}${statusMark}</span>
+          ${lines.meta ? `<span class="ev-meta">${lines.meta}</span>` : ""}
+          ${lines.result ? `<span class="ev-result">${lines.result}</span>` : ""}
+        </span>
+        <span class="ev-dur" ${running ? `data-since="${startEpoch}"` : ""}>${fmtDur(end - event.t0)}</span>
+        <span class="ev-track"><span class="ev-bar kind-${event.kind}" style="left:${left}%;width:${Math.min(width, 100 - left)}%"></span></span>
+      </div>
+      ${open ? eventDetail(event) : ""}
+    </div>`;
+}
+
+function eventLines(event) {
+  if (event.kind === "llm") {
+    const meta = [modelName(event.model)];
+    if (event.usage) {
+      const u = event.usage;
+      meta.push(`${fmtTokens(tokensIn(u))} in${u.cache_read_tokens ? ` (${fmtTokens(u.cache_read_tokens)} cached)` : ""} · ${fmtTokens(u.output_tokens)} out`, fmtCost(u.cost_usd));
+    }
+    if (event.stop_reason) meta.push(`stop: ${event.stop_reason}`);
+    if (event.retries) meta.push(`<span class="warn-text">${plural(event.retries, "retry", "retries")}</span>`);
+    return {
+      title: `<span class="ev-title">${esc(event.label)}</span>`,
+      meta: meta.map((m) => (m.startsWith("<") ? m : esc(m))).join(" · "),
+      result: event.error ? `<span class="error-text">${esc(event.error)}</span>` : esc(event.summary),
+    };
+  }
+  if (event.kind === "tool") {
+    const args = Object.entries(event.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+    return {
+      title: `<code class="ev-call">${esc(event.label)}(${esc(shortTitle(args, 140))})</code>`,
+      meta: esc(event.summary),
+      result: event.error ? `<span class="error-text">Error: ${esc(event.error)}</span>`
+        : event.result ? `<span class="ev-returned">→ ${esc(event.result)}</span>` : "",
+    };
+  }
+  return {
+    title: `<span class="ev-title">${esc(event.label)}</span>`,
+    meta: esc(event.summary),
+    result: event.error ? `<span class="error-text">${esc(event.error)}</span>` : "",
+  };
+}
+
+function eventDetail(event) {
+  if (event.status === "running") return `<div class="ev-detail muted small">Still running. The prompt and reply appear when it finishes.</div>`;
+  const sections = state.log.details.get(event.id);
+  if (!sections) return `<div class="ev-detail muted small">Loading…</div>`;
+  if (!sections.length) return `<div class="ev-detail muted small">No details were recorded.</div>`;
+  return `<div class="ev-detail">${sections.map((section, i) => {
+    const key = `${event.id}:${i}`;
+    const isOpen = state.log.sections.has(key) ? state.log.sections.get(key) : section.open;
+    const body = section.format === "list"
+      ? `<ol class="sec-list">${section.body.map((item) => `<li>${esc(item)}</li>`).join("")}</ol>`
+      : `<pre class="sec-pre">${esc(section.body)}</pre>`;
+    return `<details class="sec" data-key="${key}" ${isOpen ? "open" : ""}><summary>${esc(section.title)}</summary>${body}</details>`;
+  }).join("")}</div>`;
+}
+
+async function fetchOpenDetails(run) {
+  for (const event of run.events) {
+    const id = event.id;
+    if (!state.log.open.has(id) || event.status === "running") continue;
+    if (state.log.details.has(id) || state.log.fetching.has(id)) continue;
+    state.log.fetching.add(id);
+    try {
+      state.log.details.set(id, (await api(`/api/log/events/${id}`)).sections);
+    } catch (err) {
+      state.log.details.set(id, [{ title: "Error", body: err.message, open: true, format: "text" }]);
+    }
+    state.log.fetching.delete(id);
+    if (state.log.selected === run.id) renderRunDetail();
+  }
+}
+
+// Between polls, keep the running timers moving
+function tickLog() {
+  const now = Date.now() / 1000;
+  for (const el of document.querySelectorAll("#log-view [data-since]")) {
+    el.textContent = fmtDur(now - Number(el.dataset.since));
+  }
+}
+
+// ============================================================================
 // Onboarding
 // ============================================================================
 
@@ -753,10 +1287,16 @@ async function buildProfile() {
   form.append("papers", papers);
   if (file) form.append("file", file);
 
-  state.build = { steps: [], error: null };
+  state.build = { steps: [], error: null, runId: null };
   renderOnboarding();
+  updateNav();
   try {
     const final = await streamEvents("/api/profile/build", { body: form }, (event) => {
+      if (event.type === "run") {
+        state.build.runId = event.run_id;
+        pollLogSoon();
+        renderOnboarding();
+      }
       if (event.type === "step") {
         state.build.steps.push(event.text);
         renderOnboarding();
@@ -768,6 +1308,7 @@ async function buildProfile() {
     state.build.error = err.message;
     renderOnboarding();
   }
+  updateNav();
 }
 
 async function usePersona(id) {
@@ -786,6 +1327,8 @@ function startWorkspace(profile) {
   state.feedStale = false;
   state.prevScores = null;
   state.chat = [];
+  state.report = null;
+  state.refreshIssues = [];
   render();
   setTab("feed");
   refreshFeed();
@@ -860,6 +1403,30 @@ const actions = {
   suggest: (el) => ask(el.dataset.text),
   apply: (el) => applyProposal(Number(el.dataset.index)),
   discard: (el) => discardProposal(Number(el.dataset.index)),
+  "open-report": () => openReport(),
+  "close-report": () => { state.report = null; renderFeed(); },
+  "report-tab": (el) => { state.report.tab = el.dataset.tab; renderFeed(); },
+  "want-this": (el) => wantThis(el.dataset.id),
+  view: (el) => setView(el.dataset.view),
+  "open-log": (el) => setView("log", Number(el.dataset.run)),
+  "select-run": (el) => {
+    state.log.selected = Number(el.dataset.id);
+    state.log.follow = false;
+    state.log.listOnly = false;
+    renderLog();
+  },
+  "log-back": () => { state.log.listOnly = true; renderLog(); },
+  "log-filter": (el) => { state.log.agent = el.dataset.agent; renderRunList(); },
+  "toggle-event": (el) => {
+    const id = Number(el.dataset.id);
+    if (state.log.open.has(id)) state.log.open.delete(id); else state.log.open.add(id);
+    renderRunDetail();
+  },
+  "toggle-group": (el) => {
+    const id = Number(el.dataset.id);
+    if (state.log.collapsed.has(id)) state.log.collapsed.delete(id); else state.log.collapsed.add(id);
+    renderRunDetail();
+  },
 };
 
 document.addEventListener("click", (event) => {
@@ -878,6 +1445,12 @@ document.addEventListener("change", (event) => {
 });
 
 $("#reset-btn").addEventListener("click", startOver);
+
+// Remember which log sections the user opened or closed, so live updates don't reset them
+document.addEventListener("toggle", (event) => {
+  const el = event.target;
+  if (el.matches?.("details.sec[data-key]")) state.log.sections.set(el.dataset.key, el.open);
+}, true);
 
 // ============================================================================
 // Start

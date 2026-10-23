@@ -16,11 +16,13 @@ from typing import Any, Callable, Optional
 
 from anthropic import beta_tool
 
-from paperfind_llm import arxiv, config, store
-from paperfind_llm.claude import fallback_params, get_client, session_usage
+from paperfind_llm import activity, arxiv, config, store
+from paperfind_llm.activity import section
+from paperfind_llm.claude import call, fallback_params
 from paperfind_llm.screen import get_feed, rescore, window_start
 
-MAX_STEPS = 16
+MAX_TURNS = 16  # model requests per message
+MAX_LOGGED_RESULT_CHARS = 300
 MAX_TEST_PAPERS = 15
 HISTORY_MESSAGES = 6
 
@@ -66,6 +68,7 @@ class Session:
 
     def step(self, text: str) -> None:
         self.emit({"type": "step", "text": text})
+        activity.note(text)  # the running tool call's plain-language description in the log
 
     def theme(self, theme_id: str) -> dict[str, Any]:
         for theme in self.draft["themes"]:
@@ -323,72 +326,121 @@ def _build_tools(session: Session) -> list:
     ]
 
 
+def _short(value: Any, limit: int = 120) -> Any:
+    """A tool argument shortened for the log's one-line view."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[: limit - 1] + "…"
+    if isinstance(value, list) and len(value) > 4:
+        return [*value[:3], f"… {len(value) - 3} more"]
+    return value
+
+
+def _run_tool(tools: dict[str, Any], block: Any) -> dict[str, Any]:
+    """Run one tool call from the model and log it. Errors go back to the model as the result."""
+    with activity.span("tool", block.name, args={k: _short(v) for k, v in (block.input or {}).items()}) as event:
+        tool = tools.get(block.name)
+        try:
+            if tool is None:
+                raise ValueError(f"There is no tool named {block.name}.")
+            content = tool.call(block.input)
+        except Exception as exc:
+            event.finish("error", error=str(exc), detail=[section("Arguments", block.input, open=True, format="code")])
+            return {"type": "tool_result", "tool_use_id": block.id, "content": f"Error: {exc}", "is_error": True}
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        one_line = " ".join(text.split())
+        event.finish(
+            result=one_line[:MAX_LOGGED_RESULT_CHARS] + ("…" if len(one_line) > MAX_LOGGED_RESULT_CHARS else ""),
+            detail=[
+                section("Arguments", block.input, open=True, format="code"),
+                section("Result", text, open=True, format="code" if text.lstrip().startswith(("{", "[")) else "text"),
+            ],
+        )
+        return {"type": "tool_result", "tool_use_id": block.id, "content": content}
+
+
 def run(message: str, emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
     """Run the assistant on one message. Returns the reply and any proposal."""
     profile = store.load_profile()
     if profile is None:
         raise ValueError("Set up your interests first.")
 
-    session = Session(profile, emit)
-    history = "".join(f"{m['role'].upper()}: {m['text']}\n" for m in _history[-HISTORY_MESSAGES:])
-    user_message = f"Today is {date.today().isoformat()}.\n"
-    if history:
-        user_message += f"Earlier in this conversation:\n{history}\n"
-    user_message += f"USER: {message}"
+    title = message if len(message) <= 90 else message[:89] + "…"
+    with activity.run("assistant", title, emit, input=message) as log:
+        session = Session(profile, emit)
+        history = "".join(f"{m['role'].upper()}: {m['text']}\n" for m in _history[-HISTORY_MESSAGES:])
+        user_message = f"Today is {date.today().isoformat()}.\n"
+        if history:
+            user_message += f"Earlier in this conversation:\n{history}\n"
+        user_message += f"USER: {message}"
 
-    model = config.AGENT_MODEL
-    runner = get_client().beta.messages.tool_runner(
-        model=model,
-        max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        tools=_build_tools(session),
-        messages=[{"role": "user", "content": user_message}],
-        output_config={"effort": "medium"},
-        cache_control={"type": "ephemeral"},
-        max_iterations=MAX_STEPS,
-        **fallback_params(model),
-    )
+        model = config.AGENT_MODEL
+        tools = _build_tools(session)
+        by_name = {tool.name: tool for tool in tools}
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
+        response = None
+        # Each turn: one model request, then the tool calls it asked for
+        for turn in range(1, MAX_TURNS + 1):
+            with activity.span("group", f"Turn {turn}") as group:
+                response = call(
+                    f"Assistant turn {turn}",
+                    model=model,
+                    max_tokens=16000,
+                    system=SYSTEM_PROMPT,
+                    tools=[tool.to_dict() for tool in tools],
+                    messages=messages,
+                    output_config={"effort": "medium"},
+                    cache_control={"type": "ephemeral"},
+                    **fallback_params(model),
+                )
+                calls = [block for block in response.content if block.type == "tool_use"]
+                if response.stop_reason != "tool_use" or not calls:
+                    group.finish(summary="wrote the reply" if response.stop_reason == "end_turn" else f"stopped: {response.stop_reason}")
+                    break
+                group.update(summary="called " + ", ".join(block.name for block in calls))
+                messages.append(response.to_param())
+                messages.append({"role": "user", "content": [_run_tool(by_name, block) for block in calls]})
 
-    last = None
-    for response in runner:
-        last = response
-        session_usage.add(response.usage, model)
+        if response is None:
+            raise ValueError("The assistant returned no response.")
+        if response.stop_reason == "refusal":
+            raise ValueError("Claude declined this request. Try rephrasing it.")
+        reply = "\n".join(b.text for b in response.content if b.type == "text").strip()
+        if not reply and response.stop_reason == "tool_use":
+            reply = "I ran out of steps before finishing. Here is what I drafted so far."
+            activity.issue("out_of_turns", f"Stopped after {MAX_TURNS} turns without a final reply.")
+        log.update(output=reply)
 
-    if last is None:
-        raise ValueError("The assistant returned no response.")
-    if last.stop_reason == "refusal":
-        raise ValueError("Claude declined this request. Try rephrasing it.")
-    reply = "\n".join(b.text for b in last.content if b.type == "text").strip()
-    if not reply and last.stop_reason == "tool_use":
-        reply = "I ran out of steps before finishing. Here is what I drafted so far."
+        _history.extend([{"role": "user", "text": message}, {"role": "assistant", "text": reply}])
+        del _history[:-HISTORY_MESSAGES]
 
-    _history.extend([{"role": "user", "text": message}, {"role": "assistant", "text": reply}])
-    del _history[:-HISTORY_MESSAGES]
+        changes = diff_profiles(profile, session.draft)
+        log.update(summary=(
+            f"proposed {len(changes)} change{'s' if len(changes) != 1 else ''}, tested on {len(session.tests)} papers"
+            if changes else "answered without changing your interests"
+        ))
+        proposal = None
+        if changes:
+            feedback_id = store.log_feedback(message, reply, [summarize(c) for c in changes], applied=False)
+            proposal = Proposal(
+                id=uuid.uuid4().hex[:8],
+                base_updated_at=profile.get("updated_at"),
+                draft=session.draft,
+                changes=changes,
+                tests=list(session.tests.values()),
+                feedback_id=feedback_id,
+            )
+            _proposals[proposal.id] = proposal
+        else:
+            store.log_feedback(message, reply, [], applied=False)
 
-    changes = diff_profiles(profile, session.draft)
-    proposal = None
-    if changes:
-        feedback_id = store.log_feedback(message, reply, [summarize(c) for c in changes], applied=False)
-        proposal = Proposal(
-            id=uuid.uuid4().hex[:8],
-            base_updated_at=profile.get("updated_at"),
-            draft=session.draft,
-            changes=changes,
-            tests=list(session.tests.values()),
-            feedback_id=feedback_id,
-        )
-        _proposals[proposal.id] = proposal
-    else:
-        store.log_feedback(message, reply, [], applied=False)
-
-    return {
-        "reply": reply,
-        "proposal": {
-            "id": proposal.id,
-            "changes": [{**c, "summary": summarize(c)} for c in proposal.changes],
-            "tests": proposal.tests,
-        } if proposal else None,
-    }
+        return {
+            "reply": reply,
+            "proposal": {
+                "id": proposal.id,
+                "changes": [{**c, "summary": summarize(c)} for c in proposal.changes],
+                "tests": proposal.tests,
+            } if proposal else None,
+        }
 
 
 def apply_proposal(proposal_id: str) -> dict[str, Any]:
